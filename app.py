@@ -18,11 +18,17 @@ st.set_page_config(page_title="Pennywise · Personal Finance",page_icon="🌱",l
 def get_client():
     if "supabase_client" not in st.session_state:
         try:
-            settings=st.secrets["supabase"]
-            url=settings["url"]
-            key=settings["anon_key"]
+            if "supabase" in st.secrets:
+                settings=st.secrets["supabase"]
+                url=settings["url"]
+                key=settings["anon_key"]
+            else:
+                url=st.secrets["SUPABASE_URL"]
+                key=st.secrets["SUPABASE_KEY"]
         except (KeyError, FileNotFoundError) as exc:
-            raise ValueError("Configure [supabase].url and [supabase].anon_key in Streamlit secrets.") from exc
+            raise ValueError("Configure SUPABASE_URL and SUPABASE_KEY in .streamlit/secrets.toml, or use [supabase].url and [supabase].anon_key.") from exc
+        if not str(url).strip() or not str(key).strip():
+            raise ValueError("SUPABASE_URL and SUPABASE_KEY must both have non-empty values.")
         st.session_state.supabase_client=create_client(str(url),str(key))
     return st.session_state.supabase_client
 

@@ -8,7 +8,14 @@ Adding an initial amount to a new savings goal or recording a later contribution
 
 1. Install Python 3.10 or newer.
 2. Create a Supabase project and run [`supabase_schema.sql`](./supabase_schema.sql) in the Supabase SQL Editor. This creates the app tables, Row Level Security policies, and the atomic account-backup restore function.
-3. Configure Streamlit secrets locally in `.streamlit/secrets.toml` or in the app's Streamlit Cloud settings:
+3. Configure Streamlit secrets locally in `.streamlit/secrets.toml` (the directory name starts with a dot) or in the app's Streamlit Cloud settings. The app accepts either format:
+
+   ```toml
+   SUPABASE_URL = "https://YOUR_PROJECT_REF.supabase.co"
+   SUPABASE_KEY = "YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY"
+   ```
+
+   Or:
 
    ```toml
    [supabase]
