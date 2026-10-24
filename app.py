@@ -8,6 +8,26 @@ import plotly.express as px
 import streamlit as st
 from postgrest.exceptions import APIError
 from supabase import AuthApiError, create_client
+import streamlit as st
+
+# Inject custom CSS to hide the header bar and collapse the top padding
+st.markdown(
+    """
+    <style>
+    /* Hide the entire top header bar */
+    [data-testid="stHeader"] {
+        visibility: hidden;
+        height: 0%;
+    }
+    
+    /* Remove the default top padding to bring content up */
+    .stAppViewBlockContainer {
+        padding-top: 0rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 CATEGORIES=["Food","Transport","Utilities","Education","Shopping","Entertainment","Housing","Health","Salary","Freelance","Other","Savings contribution"]
 CURRENCIES={"PKR · Rs":"Rs","USD · $":"$","EUR · €":"€","GBP · £":"£","INR · ₹":"₹","AED · د.إ":"د.إ"}
