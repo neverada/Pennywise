@@ -28,6 +28,63 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+import streamlit as st
+
+st.markdown(
+    """
+    <style>
+        /* 1. Fix Top Bar Alignment & Mobile Distortion */
+        /* Target the header container where Streamlit and custom top elements sit */
+        header[data-testid="stHeader"] {
+            background-color: transparent !important;
+        }
+        
+        /* Adjust main app container padding for cleaner top alignment */
+        .block-container {
+            padding-top: 2rem !important;
+            padding-bottom: 3rem !important;
+        }
+
+        /* Responsive adjustments for the top navigation bar / title area */
+        @media (max-width: 768px) {
+            /* Stack or adjust spacing for mobile viewports */
+            .stApp header {
+                padding: 0 0.5rem;
+            }
+        }
+
+        /* 2. Hide the "Manage app" badge / Streamlit footer elements on bottom right */
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        .stDeployButton {display: none !important;}
+        div[data-testid="stStatusWidget"] {
+            visibility: hidden !important;
+            display: none !important;
+        }
+        /* Specific selector for Streamlit Community Cloud floating badges */
+        .viewerBadge_container__1QSob, 
+        iframe[title="Streamlit App"], 
+        section[data-testid="stSidebarNav"] + div div iframe {
+            display: none !important;
+        }
+
+        /* 3. Style / Clean up transaction delete and edit signs */
+        /* If delete buttons or icons look misaligned */
+        button[kind="secondary"] {
+            border-radius: 6px;
+            border: 1px solid #e0e0e0;
+            transition: all 0.2s ease;
+        }
+        
+        /* Improve spacing for transaction rows */
+        div[data-testid="column"] {
+            display: flex;
+            align-items: center;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 CATEGORIES=["Food","Transport","Utilities","Education","Shopping","Entertainment","Housing","Health","Salary","Freelance","Other","Savings contribution"]
 CURRENCIES={"PKR · Rs":"Rs","USD · $":"$","EUR · €":"€","GBP · £":"£","INR · ₹":"₹","AED · د.إ":"د.إ"}
