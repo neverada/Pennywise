@@ -1,0 +1,30 @@
+{
+  "name": "pennywise",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "python3 run_app.py",
+    "build": "python3 -m py_compile app.py",
+    "lint": "python3 -m py_compile app.py",
+    "start": "python3 run_app.py"
+  },
+  "dependencies": {
+    "jspdf": "^2.5.2",
+    "lucide-react": "^1.16.0",
+    "papaparse": "^5.5.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/node": "^22.0.0",
+    "@types/papaparse": "^5.3.16",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.0"
+  }
+}

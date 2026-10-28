@@ -1,0 +1,8 @@
+{
+  "name": "Pennywise Personal Finance",
+  "description": "Personal finance tracker for income, expenses, monthly budgets, savings goals, CSV bank imports, visual analytics, and data backup.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
