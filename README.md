@@ -13,3 +13,11 @@ A Streamlit personal finance dashboard with custom styling, structured tabs, fin
 - **Permanent Account Deletion**:
   - Dedicated "Danger Zone" in Settings.
   - Secure confirmation to permanently wipe all transactions, budgets, goals, custom categories, and user profile data.
+
+    
+ ## Requirements & Setup
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
