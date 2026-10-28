@@ -187,3 +187,78 @@ $$;
 
 revoke all on function public.restore_account_backup(jsonb, jsonb, jsonb, jsonb) from public, anon;
 grant execute on function public.restore_account_backup(jsonb, jsonb, jsonb, jsonb) to authenticated;
+
+create or replace function public.seed_demo_data()
+returns void
+language plpgsql
+security invoker
+set search_path = public, pg_temp
+as $$
+declare
+    current_user_id uuid := auth.uid();
+    trip_goal_id bigint;
+begin
+    if current_user_id is null then
+        raise exception 'Authentication required';
+    end if;
+
+    if exists (select 1 from public.transactions where user_id = current_user_id)
+       or exists (select 1 from public.budgets where user_id = current_user_id)
+       or exists (select 1 from public.goals where user_id = current_user_id)
+       or exists (select 1 from public.categories where user_id = current_user_id) then
+        return;
+    end if;
+
+    insert into public.profiles (id, currency)
+    values (current_user_id, 'Rs')
+    on conflict (id) do nothing;
+
+    insert into public.categories (user_id, name)
+    values (current_user_id, 'Books'), (current_user_id, 'Travel')
+    on conflict (user_id, name) do nothing;
+
+    insert into public.budgets (user_id, month, category, amount)
+    values
+        (current_user_id, to_char(current_date, 'YYYY-MM'), 'All spending', 80000),
+        (current_user_id, to_char(current_date, 'YYYY-MM'), 'Food', 20000),
+        (current_user_id, to_char(current_date, 'YYYY-MM'), 'Transport', 10000)
+    on conflict (user_id, month, category) do nothing;
+
+    insert into public.goals (user_id, name, target, saved, due_date)
+    values (
+        current_user_id,
+        'Weekend getaway',
+        100000,
+        30000,
+        (current_date + interval '120 days')::date::text
+    )
+    returning id into trip_goal_id;
+
+    insert into public.transactions
+        (user_id, txn_date, amount, kind, category, note, goal_id)
+    values
+        (current_user_id, current_date - 150, 175000, 'Income', 'Salary', 'Monthly salary', null),
+        (current_user_id, current_date - 146, 4200, 'Expense', 'Food', 'Groceries', null),
+        (current_user_id, current_date - 141, 1800, 'Expense', 'Transport', 'Commute', null),
+        (current_user_id, current_date - 120, 175000, 'Income', 'Salary', 'Monthly salary', null),
+        (current_user_id, current_date - 116, 7600, 'Expense', 'Utilities', 'Electricity and internet', null),
+        (current_user_id, current_date - 110, 5200, 'Expense', 'Food', 'Groceries', null),
+        (current_user_id, current_date - 90, 185000, 'Income', 'Salary', 'Monthly salary', null),
+        (current_user_id, current_date - 84, 3500, 'Expense', 'Shopping', 'Household items', null),
+        (current_user_id, current_date - 78, 4800, 'Expense', 'Food', 'Groceries', null),
+        (current_user_id, current_date - 60, 185000, 'Income', 'Salary', 'Monthly salary', null),
+        (current_user_id, current_date - 54, 8200, 'Expense', 'Utilities', 'Monthly bills', null),
+        (current_user_id, current_date - 48, 4900, 'Expense', 'Food', 'Groceries', null),
+        (current_user_id, current_date - 30, 185000, 'Income', 'Salary', 'Monthly salary', null),
+        (current_user_id, current_date - 24, 3200, 'Expense', 'Food', 'Groceries', null),
+        (current_user_id, current_date - 21, 1600, 'Expense', 'Transport', 'Commute', null),
+        (current_user_id, current_date - 17, 8200, 'Expense', 'Utilities', 'Monthly bills', null),
+        (current_user_id, current_date - 12, 4900, 'Expense', 'Shopping', 'Household items', null),
+        (current_user_id, current_date - 8, 22000, 'Income', 'Freelance', 'Design project', null),
+        (current_user_id, current_date - 5, 2700, 'Expense', 'Food', 'Groceries', null),
+        (current_user_id, current_date - 2, 10000, 'Expense', 'Savings contribution', 'Trip savings contribution', trip_goal_id);
+end;
+$$;
+
+revoke all on function public.seed_demo_data() from public, anon;
+grant execute on function public.seed_demo_data() to authenticated;

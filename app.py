@@ -164,6 +164,16 @@ def restore_backup(data,uid):
         if currency in CURRENCIES.values():
             get_client().table("profiles").update({"currency":currency}).eq("id",uid).execute()
 
+def start_demo_session():
+    response=get_client().auth.sign_in_anonymously()
+    user=response.user
+    if not user:
+        raise ValueError("Supabase did not return a demo account.")
+    ensure_profile(user.id)
+    get_client().rpc("seed_demo_data").execute()
+    st.session_state.user_id=user.id
+    st.session_state.user_email="Demo account"
+
 def css():
     st.markdown("""<style>
     @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Source+Sans+3:wght@400;500;600;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400,0,0&display=swap');
@@ -239,6 +249,14 @@ def auth():
                     st.rerun()
                 except AuthApiError:
                     st.error("Email or password is incorrect. If email confirmation is enabled, verify your email first.")
+            with st.expander("Explore the demo account"):
+                st.caption("Try Pennywise with sample transactions, budgets, and a savings goal. Your demo data is private to this session.")
+                if st.button("Start demo",key="demo-login",type="primary",use_container_width=True):
+                    try:
+                        start_demo_session()
+                        st.rerun()
+                    except (AuthApiError,APIError,ValueError) as exc:
+                        st.error(f"Could not start the demo: {exc}. Make sure anonymous sign-ins are enabled in Supabase Auth and the latest database schema has been applied.")
         with signup:
             with st.form("signup"):
                 email=st.text_input("Email address",key="signup-email"); password=st.text_input("Password",type="password",key="signup-password",help="Use at least 8 characters."); currency=st.selectbox("Currency",list(CURRENCIES),key="signup-currency"); go=st.form_submit_button("Create account",type="primary",use_container_width=True)

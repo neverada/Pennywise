@@ -27,7 +27,7 @@ Adding an initial amount to a new savings goal or recording a later contribution
 4. Install the packages: `python -m pip install -r requirements.txt`
 5. Start the app: `streamlit run app.py`, then create an account or sign in.
 
-The app does not create or manage the Supabase schema automatically; apply the SQL file before first use. All table operations use the signed-in Supabase client, and the database policies independently enforce ownership using `auth.uid()`.
+The app does not create or manage the Supabase schema automatically; apply the SQL file before first use. In Supabase Dashboard, enable **Allow anonymous sign-ins** under **Authentication → Sign In / Providers → Anonymous** to use the demo button. Each demo visit creates a separate anonymous account and seeds its own sample transactions, budgets, and savings goal. The demo account and its records are temporary to that visitor's session; do not use demo sign-in for personal data. All table operations use the signed-in Supabase client, and the database policies independently enforce ownership using `auth.uid()`.
 
 ## Bank CSV format
 
