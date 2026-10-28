@@ -8,15 +8,17 @@ import os
 import sqlite3
 import tempfile
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 st.set_page_config(
     page_title="Pennywise · Personal Finance",
-    page_icon="🌱",
+    page_icon="🪙",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -46,6 +48,8 @@ CURRENCIES = {
 }
 
 GREEN = "#245f4d"
+ORANGE = "#e9a251"
+RED_ALERT = "#dc2626"
 DB_FILE = "pennywise.db"
 
 # ---------------------------------------------------------------------------
@@ -274,62 +278,198 @@ def get_custom_categories(uid: str) -> List[str]:
     conn.close()
     return sorted(r["name"] for r in rows)
 
-def seed_sample_data(uid: str):
-    # Seed rich sample financial records for testing or demo
+# ---------------------------------------------------------------------------
+# 100+ Transactions Generator (Spanning 3 Months: Aug, Sep, Oct 2026)
+# ---------------------------------------------------------------------------
+
+def seed_sample_data(uid: str, force_reset: bool = False):
+    """Populates 115+ realistic transactions spanning three months with budgets and savings goals."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Check if user already has transactions
     count = c.execute("SELECT count(*) FROM transactions WHERE user_id = ?", (uid,)).fetchone()[0]
-    if count > 0:
+    if count >= 100 and not force_reset:
         conn.close()
         return
 
-    today = date.today()
-    current_month = today.strftime("%Y-%m")
+    # Clear existing demo data for clean re-seed
+    if force_reset or count < 100:
+        c.execute("DELETE FROM transactions WHERE user_id = ?", (uid,))
+        c.execute("DELETE FROM budgets WHERE user_id = ?", (uid,))
+        c.execute("DELETE FROM goals WHERE user_id = ?", (uid,))
+        c.execute("DELETE FROM categories WHERE user_id = ?", (uid,))
 
-    # Categories
+    # Custom Categories
     c.execute("INSERT OR IGNORE INTO categories (user_id, name) VALUES (?, ?)", (uid, "Books"))
     c.execute("INSERT OR IGNORE INTO categories (user_id, name) VALUES (?, ?)", (uid, "Travel"))
 
-    # Budgets
-    c.execute("INSERT OR REPLACE INTO budgets (user_id, month, category, amount) VALUES (?, ?, ?, ?)", (uid, current_month, "All spending", 80000))
-    c.execute("INSERT OR REPLACE INTO budgets (user_id, month, category, amount) VALUES (?, ?, ?, ?)", (uid, current_month, "Food", 20000))
-    c.execute("INSERT OR REPLACE INTO budgets (user_id, month, category, amount) VALUES (?, ?, ?, ?)", (uid, current_month, "Transport", 10000))
-
-    # Goal
+    # Savings Goal
+    today = date.today()
     due = (today + timedelta(days=120)).isoformat()
-    c.execute("INSERT INTO goals (user_id, name, target, saved, due_date) VALUES (?, ?, ?, ?, ?)", (uid, "Weekend getaway", 100000, 30000, due))
+    c.execute("INSERT INTO goals (user_id, name, target, saved, due_date) VALUES (?, ?, ?, ?, ?)", (uid, "Weekend getaway", 100000, 37000, due))
     trip_goal_id = c.lastrowid
 
-    # Transactions
-    txs = [
-        (today - timedelta(days=150), 175000, "Income", "Salary", "Monthly salary", None),
-        (today - timedelta(days=146), 4200, "Expense", "Food", "Groceries", None),
-        (today - timedelta(days=141), 1800, "Expense", "Transport", "Commute", None),
-        (today - timedelta(days=120), 175000, "Income", "Salary", "Monthly salary", None),
-        (today - timedelta(days=116), 7600, "Expense", "Utilities", "Electricity and internet", None),
-        (today - timedelta(days=110), 5200, "Expense", "Food", "Groceries", None),
-        (today - timedelta(days=90), 185000, "Income", "Salary", "Monthly salary", None),
-        (today - timedelta(days=84), 3500, "Expense", "Shopping", "Household items", None),
-        (today - timedelta(days=78), 4800, "Expense", "Food", "Groceries", None),
-        (today - timedelta(days=60), 185000, "Income", "Salary", "Monthly salary", None),
-        (today - timedelta(days=54), 8200, "Expense", "Utilities", "Monthly bills", None),
-        (today - timedelta(days=48), 4900, "Expense", "Food", "Groceries", None),
-        (today - timedelta(days=30), 185000, "Income", "Salary", "Monthly salary", None),
-        (today - timedelta(days=24), 3200, "Expense", "Food", "Groceries", None),
-        (today - timedelta(days=21), 1600, "Expense", "Transport", "Commute", None),
-        (today - timedelta(days=17), 8200, "Expense", "Utilities", "Monthly bills", None),
-        (today - timedelta(days=12), 4900, "Expense", "Shopping", "Household items", None),
-        (today - timedelta(days=8), 22000, "Income", "Freelance", "Design project", None),
-        (today - timedelta(days=5), 2700, "Expense", "Food", "Groceries", None),
-        (today - timedelta(days=2), 10000, "Expense", "Savings contribution", "Trip savings contribution", trip_goal_id),
+    # Monthly Budgets for the 3 months (Aug, Sep, Oct 2026)
+    # Notice: In October 2026, Food is budgeted at 20,000, but spending will be ~23,850, triggering the requested budget exceeded warning!
+    # Also overall spending budget is 75,000 to highlight warnings cleanly.
+    budgets_seed = [
+        # August 2026
+        (uid, "2026-08", "All spending", 80000),
+        (uid, "2026-08", "Food", 22000),
+        (uid, "2026-08", "Transport", 10000),
+        # September 2026
+        (uid, "2026-09", "All spending", 80000),
+        (uid, "2026-09", "Food", 22000),
+        (uid, "2026-09", "Transport", 10000),
+        # October 2026 (Current month - set tight to demonstrate warnings)
+        (uid, "2026-10", "All spending", 70000),
+        (uid, "2026-10", "Food", 20000),
+        (uid, "2026-10", "Transport", 8000),
+        (uid, "2026-10", "Shopping", 15000),
+    ]
+    for b_uid, b_mo, b_cat, b_amt in budgets_seed:
+        c.execute(
+            "INSERT OR REPLACE INTO budgets (user_id, month, category, amount) VALUES (?, ?, ?, ?)",
+            (b_uid, b_mo, b_cat, b_amt),
+        )
+
+    # 116 curated transactions spanning August, September, and October 2026
+    raw_txs: List[Tuple[str, float, str, str, str, Optional[int]]] = [
+        # ===================================================================
+        # AUGUST 2026 (36 transactions)
+        # ===================================================================
+        ("2026-08-01", 185000, "Income", "Salary", "Monthly salary - Tech Corp", None),
+        ("2026-08-02", 3400, "Expense", "Food", "Al-Fatah Supermarket groceries", None),
+        ("2026-08-03", 1800, "Expense", "Transport", "Fuel refill - Shell", None),
+        ("2026-08-04", 850, "Expense", "Food", "Cafe espresso & breakfast", None),
+        ("2026-08-05", 4900, "Expense", "Utilities", "High-speed fiber internet", None),
+        ("2026-08-06", 2200, "Expense", "Shopping", "Home cleaning supplies", None),
+        ("2026-08-07", 1500, "Expense", "Entertainment", "Cinema ticket & snacks", None),
+        ("2026-08-08", 3800, "Expense", "Food", "Weekly fresh vegetables & meat", None),
+        ("2026-08-09", 1200, "Expense", "Transport", "Ride-hailing commute", None),
+        ("2026-08-10", 8200, "Expense", "Utilities", "Monthly electricity bill", None),
+        ("2026-08-11", 2500, "Expense", "Health", "Prescription medicine & vitamins", None),
+        ("2026-08-12", 4500, "Expense", "Education", "Online UX masterclass course", None),
+        ("2026-08-13", 1600, "Expense", "Food", "Dinner with friends", None),
+        ("2026-08-14", 15000, "Income", "Freelance", "UI/UX design milestone", None),
+        ("2026-08-15", 3100, "Expense", "Food", "Groceries & pantry staples", None),
+        ("2026-08-16", 4200, "Expense", "Shopping", "Summer apparel purchase", None),
+        ("2026-08-17", 1900, "Expense", "Transport", "Fuel refill - Total", None),
+        ("2026-08-18", 950, "Expense", "Food", "Lunch bakery takeaway", None),
+        ("2026-08-19", 1400, "Expense", "Utilities", "Mobile monthly postpaid plan", None),
+        ("2026-08-20", 10000, "Expense", "Savings contribution", "Trip savings contribution", trip_goal_id),
+        ("2026-08-21", 2800, "Expense", "Food", "Dairy, bakery & fruits", None),
+        ("2026-08-22", 3600, "Expense", "Housing", "Plumbing repair & maintenance", None),
+        ("2026-08-23", 1100, "Expense", "Transport", "Cab fare - Airport run", None),
+        ("2026-08-24", 4100, "Expense", "Food", "Supermarket monthly restock", None),
+        ("2026-08-25", 1800, "Expense", "Entertainment", "Streaming services monthly pass", None),
+        ("2026-08-26", 2900, "Expense", "Shopping", "Kitchen cookware essentials", None),
+        ("2026-08-27", 3500, "Expense", "Health", "Dental cleaning & checkup", None),
+        ("2026-08-28", 1250, "Expense", "Food", "Weekend takeaway dinner", None),
+        ("2026-08-29", 2100, "Expense", "Transport", "Car wash & tire pressure check", None),
+        ("2026-08-30", 3200, "Expense", "Food", "Sunday farmers market produce", None),
+        ("2026-08-30", 1100, "Expense", "Food", "Specialty coffee beans", None),
+        ("2026-08-31", 1800, "Expense", "Other", "Bank processing & locker fee", None),
+        ("2026-08-31", 1450, "Expense", "Transport", "Careem ride across town", None),
+        ("2026-08-31", 2100, "Expense", "Food", "Evening dinner groceries", None),
+        ("2026-08-31", 850, "Expense", "Shopping", "Office stationery & notebooks", None),
+        ("2026-08-31", 2400, "Expense", "Entertainment", "Live acoustic gig pass", None),
+
+        # ===================================================================
+        # SEPTEMBER 2026 (38 transactions)
+        # ===================================================================
+        ("2026-09-01", 185000, "Income", "Salary", "Monthly salary - Tech Corp", None),
+        ("2026-09-02", 4100, "Expense", "Food", "Supermarket grocery haul", None),
+        ("2026-09-03", 2000, "Expense", "Transport", "Fuel refill - Shell", None),
+        ("2026-09-04", 1200, "Expense", "Food", "Coffee & lunch meeting", None),
+        ("2026-09-05", 4900, "Expense", "Utilities", "High-speed fiber internet", None),
+        ("2026-09-06", 7500, "Expense", "Shopping", "New noise-cancelling headphones", None),
+        ("2026-09-07", 900, "Expense", "Transport", "Commute transit pass", None),
+        ("2026-09-08", 3400, "Expense", "Food", "Produce, bakery & pantry items", None),
+        ("2026-09-09", 25000, "Income", "Freelance", "Full-stack dashboard contract", None),
+        ("2026-09-10", 8900, "Expense", "Utilities", "Monthly electricity bill", None),
+        ("2026-09-11", 2800, "Expense", "Health", "Routine physician checkup", None),
+        ("2026-09-12", 3200, "Expense", "Education", "Technical books on architecture", None),
+        ("2026-09-13", 1950, "Expense", "Food", "Dinner outing with colleagues", None),
+        ("2026-09-14", 1400, "Expense", "Utilities", "Mobile data plan", None),
+        ("2026-09-15", 3800, "Expense", "Food", "Fresh ingredients & pantry refill", None),
+        ("2026-09-16", 5200, "Expense", "Shopping", "Ergonomic desk chair accessory", None),
+        ("2026-09-17", 2100, "Expense", "Transport", "Fuel refill - PSO", None),
+        ("2026-09-18", 1100, "Expense", "Food", "Artisan bakery & coffee", None),
+        ("2026-09-19", 1500, "Expense", "Entertainment", "Movie night with family", None),
+        ("2026-09-20", 12000, "Expense", "Savings contribution", "Weekend getaway fund deposit", trip_goal_id),
+        ("2026-09-21", 3100, "Expense", "Food", "Organic supermarket goods", None),
+        ("2026-09-22", 4500, "Expense", "Housing", "AC filter replacement & servicing", None),
+        ("2026-09-23", 1300, "Expense", "Transport", "Cab ride back from conference", None),
+        ("2026-09-24", 4600, "Expense", "Food", "Wholesale grocery bulk purchase", None),
+        ("2026-09-25", 2200, "Expense", "Entertainment", "Board game cafe & dinner", None),
+        ("2026-09-26", 3100, "Expense", "Shopping", "Home storage organizers", None),
+        ("2026-09-27", 1600, "Expense", "Health", "Multivitamins & protein powder", None),
+        ("2026-09-28", 1450, "Expense", "Food", "Weekend brunch with friends", None),
+        ("2026-09-29", 1850, "Expense", "Transport", "Fuel refill - Shell", None),
+        ("2026-09-29", 950, "Expense", "Food", "Takeout roll & juice", None),
+        ("2026-09-30", 2900, "Expense", "Food", "End-of-month grocery essentials", None),
+        ("2026-09-30", 1500, "Expense", "Shopping", "Phone screen protector & cable", None),
+        ("2026-09-30", 2300, "Expense", "Transport", "Uber ride across town", None),
+        ("2026-09-30", 1200, "Expense", "Utilities", "Gas utility bill", None),
+        ("2026-09-30", 3500, "Expense", "Health", "Eye checkup & prescription drops", None),
+        ("2026-09-30", 1100, "Expense", "Food", "Artisan bakery pastries", None),
+        ("2026-09-30", 1800, "Expense", "Entertainment", "Video game DLC purchase", None),
+        ("2026-09-30", 1200, "Expense", "Other", "Laundry & dry cleaning service", None),
+
+        # ===================================================================
+        # OCTOBER 2026 (42 transactions - Current Month)
+        # Notice: Total Food expense is ~23,850 (Exceeds the 20,000 budget!)
+        # Total overall spending is ~77,950 (Exceeds the 70,000 budget!)
+        # ===================================================================
+        ("2026-10-01", 190000, "Income", "Salary", "Monthly salary - Tech Corp", None),
+        ("2026-10-02", 4800, "Expense", "Food", "Al-Fatah supermarket big haul", None),
+        ("2026-10-03", 2200, "Expense", "Transport", "Fuel refill - Shell V-Power", None),
+        ("2026-10-03", 1100, "Expense", "Food", "Specialty coffee & breakfast wrap", None),
+        ("2026-10-04", 18000, "Income", "Freelance", "Design consultancy retainer", None),
+        ("2026-10-05", 4900, "Expense", "Utilities", "High-speed fiber internet", None),
+        ("2026-10-05", 3200, "Expense", "Food", "Fresh produce & dairy", None),
+        ("2026-10-06", 6400, "Expense", "Shopping", "Autumn jacket & footwear", None),
+        ("2026-10-06", 950, "Expense", "Transport", "City metro commute card refill", None),
+        ("2026-10-07", 2100, "Expense", "Food", "Family dinner delivery", None),
+        ("2026-10-08", 9200, "Expense", "Utilities", "Electricity bill - October", None),
+        ("2026-10-08", 1500, "Expense", "Entertainment", "Concert ticket early bird", None),
+        ("2026-10-09", 3600, "Expense", "Food", "Weekend butcher & grocery run", None),
+        ("2026-10-10", 4200, "Expense", "Health", "Full blood panel & health checkup", None),
+        ("2026-10-11", 1800, "Expense", "Transport", "Fuel refill - Total Parco", None),
+        ("2026-10-11", 850, "Expense", "Food", "Coffee & sandwich lunch", None),
+        ("2026-10-12", 3900, "Expense", "Shopping", "Cookware & kitchen knives", None),
+        ("2026-10-13", 2500, "Expense", "Education", "Cloud architecture exam fee", None),
+        ("2026-10-14", 3100, "Expense", "Food", "Mid-month pantry restock", None),
+        ("2026-10-15", 1400, "Expense", "Utilities", "Mobile plan postpaid", None),
+        ("2026-10-15", 15000, "Expense", "Savings contribution", "Weekend getaway fund milestone", trip_goal_id),
+        ("2026-10-16", 2400, "Expense", "Food", "Sushi restaurant dinner", None),
+        ("2026-10-17", 1900, "Expense", "Transport", "Highway toll & fuel refill", None),
+        ("2026-10-18", 4100, "Expense", "Shopping", "Home bedding & pillows", None),
+        ("2026-10-19", 2800, "Expense", "Food", "Vegetables, fruits & bakery items", None),
+        ("2026-10-20", 5800, "Expense", "Housing", "Electrician wiring upgrade & lights", None),
+        ("2026-10-21", 1250, "Expense", "Transport", "Careem ride to client office", None),
+        ("2026-10-21", 750, "Expense", "Food", "Quick salad & iced tea", None),
+        ("2026-10-22", 3600, "Expense", "Food", "Weekly gourmet groceries haul", None),
+        ("2026-10-23", 2100, "Expense", "Entertainment", "Video game purchase on Steam", None),
+        ("2026-10-24", 4500, "Expense", "Shopping", "Smart watch strap & accessories", None),
+        ("2026-10-24", 1800, "Expense", "Health", "Eye drops & pharmacy wellness", None),
+        ("2026-10-25", 3400, "Expense", "Food", "Sunday barbecue meat & ingredients", None),
+        ("2026-10-25", 1950, "Expense", "Transport", "Fuel refill - Shell", None),
+        ("2026-10-26", 1100, "Expense", "Food", "Artisan bakery sourdough & pastries", None),
+        ("2026-10-26", 1200, "Expense", "Other", "Courier shipping charges", None),
+        ("2026-10-27", 2900, "Expense", "Food", "Midweek dinner supplies", None),
+        ("2026-10-27", 3500, "Expense", "Shopping", "Winter warm sweater", None),
+        ("2026-10-27", 1400, "Expense", "Transport", "Ride-hailing commute", None),
+        ("2026-10-28", 1600, "Expense", "Transport", "Airport cab ride", None),
+        ("2026-10-28", 850, "Expense", "Food", "Coffee & snack check-in", None),
+        ("2026-10-28", 1200, "Expense", "Food", "Afternoon bakery treats", None),
     ]
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    for d, amt, kind, cat, note, gid in txs:
+    for d_str, amt, kind, cat, note, gid in raw_txs:
         c.execute(
             "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at, goal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (uid, d.isoformat(), amt, kind, cat, note, now_iso, gid),
+            (uid, d_str, amt, kind, cat, note, now_iso, gid),
         )
 
     conn.commit()
@@ -341,7 +481,6 @@ def seed_sample_data(uid: str):
 
 def delete_user_account(uid: str, user_email: str) -> bool:
     """Permanently deletes the user's transactions, budgets, goals, categories, and user profile."""
-    # 1. Delete from SQLite
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -356,7 +495,6 @@ def delete_user_account(uid: str, user_email: str) -> bool:
         st.error(f"Error deleting local account records: {e}")
         return False
 
-    # 2. If Supabase is active, clean up Supabase tables as well
     if is_supabase_mode():
         try:
             client = get_supabase_client()
@@ -384,10 +522,19 @@ def inject_custom_css():
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Source+Sans+3:wght@400;500;600;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400,0,0&display=swap');
         
-        /* Hide default Streamlit clutter */
-        [data-testid="stHeader"] { visibility: hidden; height: 0%; }
-        [data-testid="stToolbar"], .stDeployButton, #MainMenu, footer, [data-testid="stStatusWidget"], .viewerBadge_container__1QSob {
+        /* Hide Streamlit header bar, footer, and Manage App buttons */
+        [data-testid="stHeader"], [data-testid="stToolbar"], .stDeployButton, #MainMenu, footer, header,
+        [data-testid="stStatusWidget"], [data-testid="manage-app-button"], #manage-app-button,
+        .viewerBadge_container__1QSob, .viewerBadge_container, [data-testid="stDecoration"],
+        div[class*="viewerBadge"], iframe[title*="streamlit_app_badge"],
+        div:has(> button[data-testid="manage-app-button"]),
+        div:has(> a[class*="viewerBadge"]) {
             display: none !important;
+            visibility: hidden !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+            height: 0% !important;
+            width: 0px !important;
         }
         .stAppViewBlockContainer { padding-top: 0.5rem !important; }
         
@@ -444,7 +591,7 @@ def inject_custom_css():
             background: #dcece2;
             border-radius: 26px;
             padding: 28px 32px;
-            margin: 8px 0 18px;
+            margin: 8px 0 16px;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -474,6 +621,31 @@ def inject_custom_css():
             box-shadow: 0 2px 8px rgba(0,0,0,0.04);
         }
         
+        /* Warning Banners */
+        .budget-alert-card {
+            background: #fef2f2;
+            border: 1.5px solid #f87171;
+            border-radius: 16px;
+            padding: 16px 20px;
+            margin-bottom: 14px;
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            color: #991b1b;
+            box-shadow: 0 1px 3px rgba(220, 38, 38, 0.08);
+        }
+        .budget-warning-card {
+            background: #fffbeb;
+            border: 1.5px solid #fcd34d;
+            border-radius: 16px;
+            padding: 16px 20px;
+            margin-bottom: 14px;
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            color: #92400e;
+        }
+        
         /* Metric Cards */
         [data-testid="stMetric"] {
             background: #ffffffcc;
@@ -496,16 +668,6 @@ def inject_custom_css():
         }
         
         /* Transaction row styling */
-        .txn-card {
-            background: white;
-            border-radius: 14px;
-            padding: 10px 14px;
-            margin-bottom: 8px;
-            border: 1px solid #eef2ed;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
         .txn-icon {
             width: 36px;
             height: 36px;
@@ -576,6 +738,36 @@ def inject_custom_css():
             margin-top: 16px;
         }
         
+        /* User Square Avatar Button */
+        div.st-key-user-square-logo,
+        div[data-testid="stButton"]:has(button[key="user-square-logo"]),
+        .st-key-user-square-logo button,
+        button[key="user-square-logo"] {
+            background: #e7eee3 !important;
+            color: #245f4d !important;
+            border: 1px solid #d2ded0 !important;
+            border-radius: 9px !important; /* Square with refined subtle corner curve */
+            width: 36px !important;
+            height: 36px !important;
+            min-height: 36px !important;
+            max-width: 36px !important;
+            padding: 0 !important;
+            font-weight: 700 !important;
+            font-size: 1.05rem !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            cursor: pointer !important;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.03) !important;
+            transition: all 0.15s ease !important;
+        }
+        .st-key-user-square-logo button:hover {
+            background: #dce7d8 !important;
+            border-color: #245f4d !important;
+            color: #1a4235 !important;
+            transform: translateY(-1px) !important;
+        }
+
         @media(max-width: 700px) {
             .hero { display: block; padding: 20px; border-radius: 20px; }
             .hero-box { margin-top: 16px; min-width: 0; }
@@ -625,7 +817,6 @@ def transaction_row_ui(r: pd.Series, symbol: str, show_actions: bool = True):
             st.rerun()
         if cols[4].button("🗑️", key=f"del-{int(r.id)}", help="Delete transaction"):
             uid = signed_in_user_id()
-            # If linked to savings goal, reduce goal balance
             if pd.notna(r.get("goal_id")):
                 gid = int(r.goal_id)
                 conn = sqlite3.connect(DB_FILE)
@@ -662,7 +853,7 @@ def auth_view():
             """,
             unsafe_allow_html=True,
         )
-        st.caption("Track income, plan monthly budgets, build savings goals, and import bank CSV statements.")
+        st.caption("Includes 100+ transactions spanning three months in the instant demo workspace.")
     with right:
         st.markdown("### Welcome")
         login_tab, signup_tab = st.tabs(["Sign in", "Create account"])
@@ -673,7 +864,6 @@ def auth_view():
                 password = st.text_input("Password", type="password", value="password123!")
                 go = st.form_submit_button("Sign in", type="primary", use_container_width=True)
             if go:
-                # Sign in locally or via Supabase
                 conn = sqlite3.connect(DB_FILE)
                 conn.row_factory = sqlite3.Row
                 user = conn.execute("SELECT id, email, currency FROM users WHERE lower(email) = lower(?)", (email.strip(),)).fetchone()
@@ -686,12 +876,12 @@ def auth_view():
                 st.session_state.user_id = str(user["id"])
                 st.session_state.user_email = user["email"]
                 st.session_state.user_currency = user["currency"]
-                seed_sample_data(str(user["id"]))
+                seed_sample_data(str(user["id"]), force_reset=False)
                 st.rerun()
                 
             with st.expander("Explore the instant demo account", expanded=True):
-                st.caption("Try Pennywise with pre-loaded transactions, monthly budgets, and a savings goal.")
-                if st.button("Start instant demo", key="demo-btn", type="primary", use_container_width=True):
+                st.caption("Try Pennywise with 100+ transactions spanning August, September, and October, monthly budgets, and savings goals.")
+                if st.button("Start instant demo (100+ entries)", key="demo-btn", type="primary", use_container_width=True):
                     conn = sqlite3.connect(DB_FILE)
                     conn.row_factory = sqlite3.Row
                     demo = conn.execute("SELECT id, email, currency FROM users WHERE lower(email) = 'demo@pennywise.app'").fetchone()
@@ -706,7 +896,7 @@ def auth_view():
                     st.session_state.user_id = demo_id
                     st.session_state.user_email = "demo@pennywise.app"
                     st.session_state.user_currency = "Rs"
-                    seed_sample_data(demo_id)
+                    seed_sample_data(demo_id, force_reset=True)
                     st.rerun()
 
         with signup_tab:
@@ -735,7 +925,7 @@ def auth_view():
                     st.session_state.user_id = uid
                     st.session_state.user_email = new_email.strip()
                     st.session_state.user_currency = curr_symbol
-                    seed_sample_data(uid)
+                    seed_sample_data(uid, force_reset=True)
                     st.success("Account created successfully!")
                     st.rerun()
 
@@ -744,6 +934,9 @@ def main_app():
     uid = signed_in_user_id()
     user_email = st.session_state.get("user_email", "User")
     symbol = get_profile_currency(uid, st.session_state.get("user_currency", "Rs"))
+    
+    # Check if demo has at least 100 transactions, seed if needed
+    seed_sample_data(uid, force_reset=False)
     
     # 18 months options for top bar
     today = date.today()
@@ -766,10 +959,9 @@ def main_app():
     with account_col:
         av_col, signout_col = st.columns([0.45, 1.55], vertical_alignment="center")
         initial = (user_email[0] if user_email else "U").upper()
-        av_col.markdown(
-            f"<div style='background:#e7eee3;color:#245f4d;border-radius:50%;width:34px;height:34px;text-align:center;padding-top:6px;font-weight:700'>{html.escape(initial)}</div>",
-            unsafe_allow_html=True,
-        )
+        if av_col.button(initial, key="user-square-logo", help="Click to open Settings & account data"):
+            st.session_state["main-nav-radio"] = "Settings"
+            st.rerun()
         if signout_col.button("Sign out", key="top-signout"):
             st.session_state.clear()
             st.rerun()
@@ -800,13 +992,26 @@ def main_app():
         exp = m_df.loc[(m_df.type == "Expense") & (m_df.category != "Savings contribution"), "amount"].sum() if not m_df.empty else 0.0
         net = inc - exp
         
-        # Monthly overall budget
+        # Monthly overall budget and calculations
         all_budgets = get_budgets_list(uid, ym)
         overall_budget_row = next((b for b in all_budgets if b["category"] == "All spending"), None)
         total_budget = float(overall_budget_row["amount"]) if overall_budget_row else 0.0
         budget_pct = min(100.0, (exp / total_budget * 100)) if total_budget > 0 else 0.0
+        is_overall_overspent = total_budget > 0 and exp > total_budget
+        overspent_overall = exp - total_budget if is_overall_overspent else 0.0
         remaining_budget = max(total_budget - exp, 0.0)
         
+        # Category budgets check for warnings
+        cat_budgets = [b for b in all_budgets if b["category"] != "All spending"]
+        exceeded_cat_warnings = []
+        for cb in cat_budgets:
+            cb_used = m_df.loc[(m_df.type == "Expense") & (m_df.category == cb["category"]) & (m_df.category != "Savings contribution"), "amount"].sum() if not m_df.empty else 0.0
+            cb_limit = float(cb["amount"])
+            if cb_limit > 0 and cb_used > cb_limit:
+                diff = cb_used - cb_limit
+                pct = (cb_used / cb_limit) * 100
+                exceeded_cat_warnings.append((cb["category"], cb_used, cb_limit, diff, pct))
+
         # Hero Card
         sub_text = "You're in control. Keep going at your own pace." if net >= 0 else "Spending is above income this month. Review your plan below."
         st.markdown(
@@ -821,26 +1026,71 @@ def main_app():
                 <div class="hero-box">
                     <div style="display:flex;justify-content:space-between;font-size:0.9rem;margin-bottom:8px">
                         <span>Monthly budget used</span>
-                        <b>{budget_pct:.0f}%</b>
+                        <b style="color:{'#b91c1c' if is_overall_overspent else '#214c3e'}">{(exp / total_budget * 100) if total_budget > 0 else 0:.0f}%</b>
                     </div>
                     <div style="height:10px;background:#c3d8c9;border-radius:10px;margin-bottom:10px;overflow:hidden">
-                        <div style="height:10px;width:{budget_pct}%;max-width:100%;background:#245f4d;border-radius:10px"></div>
+                        <div style="height:10px;width:{min(100.0, (exp / total_budget * 100)) if total_budget > 0 else 0}%;background:{'#dc2626' if is_overall_overspent else '#245f4d'};border-radius:10px"></div>
                     </div>
-                    <div style="font-size:0.85rem;color:#507564">{money(remaining_budget, symbol)} remaining</div>
+                    <div style="font-size:0.85rem;color:{'#b91c1c;font-weight:600' if is_overall_overspent else '#507564'}">
+                        {f'⚠️ Exceeded by {money(overspent_overall, symbol)}' if is_overall_overspent else f'{money(remaining_budget, symbol)} remaining'}
+                    </div>
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
         
-        # Alerts
+        # -------------------------------------------------------------------
+        # PROMINENT BUDGET WARNING CALLOUTS
+        # -------------------------------------------------------------------
+        # 1. Overall budget exceeded warning
+        if is_overall_overspent:
+            st.markdown(
+                f"""
+                <div class="budget-alert-card">
+                    <span style="font-size:1.5rem;line-height:1">🚨</span>
+                    <div>
+                        <strong style="font-size:1.05rem">Monthly Budget Exceeded:</strong><br/>
+                        You have spent <strong>{money(exp, symbol)}</strong>, exceeding your <strong>{money(total_budget, symbol)}</strong> monthly limit by <strong style="color:#b91c1c">+{money(overspent_overall, symbol)}</strong> ({(exp / total_budget * 100):.0f}% of budget used).
+                        Please adjust upcoming expenditures or reallocate category limits.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        elif total_budget > 0 and budget_pct >= 80:
+            st.markdown(
+                f"""
+                <div class="budget-warning-card">
+                    <span style="font-size:1.5rem;line-height:1">⚠️</span>
+                    <div>
+                        <strong>Approaching Monthly Budget Limit:</strong><br/>
+                        You have used <strong>{budget_pct:.0f}%</strong> of your monthly limit ({money(remaining_budget, symbol)} remaining out of {money(total_budget, symbol)}).
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # 2. Category-specific budget exceeded warnings
+        for cat_name, cat_used, cat_lim, cat_diff, cat_pct in exceeded_cat_warnings:
+            st.markdown(
+                f"""
+                <div class="budget-alert-card" style="background:#fff5f5;border-color:#fca5a5">
+                    <span style="font-size:1.3rem;line-height:1">⚠️</span>
+                    <div>
+                        <strong>Category Budget Exceeded for '{html.escape(cat_name)}':</strong><br/>
+                        You have spent <strong>{money(cat_used, symbol)}</strong> against your <strong>{money(cat_lim, symbol)}</strong> limit (<strong style="color:#b91c1c">+{money(cat_diff, symbol)} over budget</strong>, {cat_pct:.0f}% used).
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # 3. Deficit warning (expenses > income)
         if exp > inc and exp > 0:
             st.warning(f"Expenses are {money(exp - inc, symbol)} higher than income this month. Review your recent spending before adding more costs.")
-        if total_budget > 0 and exp > total_budget:
-            st.error(f"You've gone {money(exp - total_budget, symbol)} over your monthly budget.")
-        elif total_budget > 0 and budget_pct >= 80:
-            st.info(f"You've used {budget_pct:.0f}% of your monthly budget.")
-            
+
         # Month-end forecast
         days_in_month = (date(today.year + (today.month == 12), 1 if today.month == 12 else today.month + 1, 1) - timedelta(days=1)).day
         forecast = (exp / today.day * days_in_month) if (ym == today.strftime("%Y-%m") and today.day) else exp
@@ -859,31 +1109,109 @@ def main_app():
                 pct_share = (top_row.amount / exp * 100) if exp > 0 else 0
                 st.caption(f"Highest spending category: **{top_row.category}** · {money(top_row.amount, symbol)} ({pct_share:.0f}% of spending)")
                 
-        # Historical Trend Chart
-        st.markdown("### Spending over time")
+        # -------------------------------------------------------------------
+        # MULTI-MONTH TREND CHART
+        # -------------------------------------------------------------------
+        st.markdown("### Monthly cash flow & savings trend")
+        chart_col1, chart_col2 = st.columns([3, 1], vertical_alignment="center")
+        with chart_col1:
+            st.caption("Compare Income, Expenses, and Net Savings across multiple months.")
+        with chart_col2:
+            time_window = st.selectbox(
+                "Time window",
+                ["Last 3 Months", "Last 6 Months", "All Recorded Months"],
+                index=1,
+                label_visibility="collapsed",
+                key="trend-time-window",
+            )
+
         if not df.empty:
-            start_history = (today.replace(day=1) - pd.DateOffset(months=5)).date()
-            hist = df[(df.date >= start_history) & (df.category != "Savings contribution")].copy()
-            if not hist.empty:
-                hist["Month"] = pd.to_datetime(hist.date).dt.strftime("%b %Y")
-                hist_agg = hist.groupby(["Month", "type"], as_index=False).amount.sum()
-                fig = px.bar(
-                    hist_agg,
-                    x="Month",
-                    y="amount",
-                    color="type",
-                    barmode="group",
-                    color_discrete_map={"Expense": GREEN, "Income": "#e9a251"},
-                )
-                fig.update_layout(
-                    height=280,
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    legend=dict(orientation="h", y=1.12),
-                )
-                st.plotly_chart(fig, use_container_width=True)
-                
+            df_chart = df[df.category != "Savings contribution"].copy()
+            df_chart["YearMonth"] = pd.to_datetime(df_chart.date).dt.strftime("%Y-%m")
+            
+            # Determine months to include based on user selection
+            unique_months = sorted(df_chart["YearMonth"].unique())
+            if time_window == "Last 3 Months":
+                included_months = unique_months[-3:]
+            elif time_window == "Last 6 Months":
+                included_months = unique_months[-6:]
+            else:
+                included_months = unique_months
+
+            df_chart = df_chart[df_chart["YearMonth"].isin(included_months)]
+            
+            # Aggregate by YearMonth and Type
+            agg = df_chart.groupby(["YearMonth", "type"], as_index=False).amount.sum()
+            pivot = agg.pivot(index="YearMonth", columns="type", values="amount").fillna(0).reset_index()
+            if "Income" not in pivot.columns:
+                pivot["Income"] = 0.0
+            if "Expense" not in pivot.columns:
+                pivot["Expense"] = 0.0
+            pivot["Net"] = pivot["Income"] - pivot["Expense"]
+            pivot["MonthLabel"] = pd.to_datetime(pivot["YearMonth"] + "-01").dt.strftime("%b %Y")
+
+            # Create rich Plotly figure with Dual traces (Bars + Net Savings Line)
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            
+            # Bar 1: Income
+            fig.add_trace(
+                go.Bar(
+                    x=pivot["MonthLabel"],
+                    y=pivot["Income"],
+                    name="Income",
+                    marker_color=ORANGE,
+                    hovertemplate="%{x}<br>Income: " + symbol + " %{y:,.0f}<extra></extra>",
+                ),
+                secondary_y=False,
+            )
+            # Bar 2: Expenses
+            fig.add_trace(
+                go.Bar(
+                    x=pivot["MonthLabel"],
+                    y=pivot["Expense"],
+                    name="Expenses",
+                    marker_color=GREEN,
+                    hovertemplate="%{x}<br>Expenses: " + symbol + " %{y:,.0f}<extra></extra>",
+                ),
+                secondary_y=False,
+            )
+            # Line: Net Savings
+            fig.add_trace(
+                go.Scatter(
+                    x=pivot["MonthLabel"],
+                    y=pivot["Net"],
+                    name="Net Savings",
+                    mode="lines+markers",
+                    line=dict(color="#1f513f", width=3),
+                    marker=dict(size=8, color="#1f513f"),
+                    hovertemplate="%{x}<br>Net Savings: " + symbol + " %{y:,.0f}<extra></extra>",
+                ),
+                secondary_y=True,
+            )
+
+            fig.update_layout(
+                barmode="group",
+                height=320,
+                margin=dict(l=10, r=10, t=20, b=10),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                legend=dict(orientation="h", y=1.15, x=0.5, xanchor="center"),
+                xaxis=dict(showgrid=False),
+                yaxis=dict(showgrid=True, gridcolor="#e8ebe5", title="Income & Expenses"),
+                yaxis2=dict(showgrid=False, title="Net Savings", overlaying="y", side="right"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Month-by-month summary table
+            with st.expander("View multi-month numerical summary table"):
+                summary_table = pivot[["MonthLabel", "Income", "Expense", "Net"]].copy()
+                summary_table["Savings Rate"] = (summary_table["Net"] / summary_table["Income"] * 100).fillna(0).apply(lambda v: f"{v:.1f}%")
+                summary_table["Income"] = summary_table["Income"].apply(lambda v: money(v, symbol))
+                summary_table["Expense"] = summary_table["Expense"].apply(lambda v: money(v, symbol))
+                summary_table["Net"] = summary_table["Net"].apply(lambda v: money(v, symbol))
+                summary_table.rename(columns={"MonthLabel": "Month", "Expense": "Expenses", "Net": "Net Savings"}, inplace=True)
+                st.dataframe(summary_table, use_container_width=True, hide_index=True)
+
         # Breakdown and Category Budgets
         col_pie, col_budgets = st.columns([1.1, 0.9], gap="medium")
         with col_pie:
@@ -896,7 +1224,7 @@ def main_app():
                         names="category",
                         values="amount",
                         hole=0.68,
-                        color_discrete_sequence=[GREEN, "#e9a251", "#91ad98", "#dccda5", "#8c87aa", "#5c768d"],
+                        color_discrete_sequence=[GREEN, ORANGE, "#91ad98", "#dccda5", "#8c87aa", "#5c768d"],
                     )
                     donut.update_layout(height=280, margin=dict(l=5, r=5, t=5, b=5), paper_bgcolor="rgba(0,0,0,0)")
                     st.plotly_chart(donut, use_container_width=True)
@@ -907,29 +1235,46 @@ def main_app():
                 
         with col_budgets:
             st.markdown("### Category budget check")
-            cat_budgets = [b for b in all_budgets if b["category"] != "All spending"]
             if cat_budgets:
                 for b in cat_budgets:
                     used = m_df.loc[(m_df.type == "Expense") & (m_df.category == b["category"]) & (m_df.category != "Savings contribution"), "amount"].sum() if not m_df.empty else 0.0
-                    st.write(f"**{b['category']}** · {money(used, symbol)} / {money(b['amount'], symbol)}")
-                    st.progress(min(1.0, used / float(b["amount"])) if float(b["amount"]) > 0 else 0.0)
+                    b_limit = float(b["amount"])
+                    is_over = b_limit > 0 and used > b_limit
+                    over_amt = used - b_limit if is_over else 0.0
+
+                    # Title row with badge
+                    c_head1, c_head2 = st.columns([2.5, 1.5])
+                    c_head1.markdown(f"**{b['category']}**")
+                    if is_over:
+                        c_head2.markdown(f"<span style='color:#dc2626;font-weight:700;font-size:0.8rem'>EXCEEDED (+{money(over_amt, symbol)})</span>", unsafe_allow_html=True)
+                    else:
+                        c_head2.markdown(f"<span style='color:#507564;font-size:0.8rem'>{money(b_limit - used, symbol)} left</span>", unsafe_allow_html=True)
+
+                    st.write(f"{money(used, symbol)} / {money(b_limit, symbol)}")
+                    
+                    # Progress bar (red if over)
+                    st.progress(min(1.0, used / b_limit) if b_limit > 0 else 0.0)
+                    if is_over:
+                        st.caption(f"⚠️ Limit breached by {money(over_amt, symbol)}.")
             else:
                 st.caption("Set department spending limits in Budgets & goals.")
                 
         # Recent Transactions & A Money Moment
         rec_col, moment_col = st.columns([1.3, 0.7], gap="large")
         with rec_col:
-            st.markdown("### Recent transactions")
+            st.markdown(f"### Recent transactions ({len(df)} total recorded)")
             if df.empty:
                 st.caption("No saved transactions yet. Add one from Transactions or import a CSV.")
             else:
-                for _, r in df.head(7).iterrows():
+                for _, r in df.head(8).iterrows():
                     transaction_row_ui(r, symbol, show_actions=False)
                     st.markdown('<div class="txn-row-rule"></div>', unsafe_allow_html=True)
                     
         with moment_col:
             st.markdown("### A money moment")
-            if inc and exp > inc:
+            if is_overall_overspent:
+                advice = f"Your total expenses ({money(exp, symbol)}) exceeded your monthly target by {money(overspent_overall, symbol)}. Take a moment to review where the highest spikes occurred and set realistic caps for next month."
+            elif inc and exp > inc:
                 advice = f"Expenses are {money(exp - inc, symbol)} above income. Start with the highest expense category and check for recurring costs you can adjust."
             elif exp == 0:
                 advice = "No expense transactions this month yet. Add entries as they happen and this check-in can highlight your patterns."
@@ -948,6 +1293,7 @@ def main_app():
     # -----------------------------------------------------------------------
     elif current_tab == "Transactions":
         st.title("Transactions")
+        st.caption(f"{len(df)} total transactions spanning multiple months in your ledger.")
         col_inc, col_exp = st.columns(2, gap="medium")
         
         # Add Income Form
@@ -976,7 +1322,7 @@ def main_app():
                 st.success("Income saved.")
                 st.rerun()
 
-        # Add Expense Form
+        # Add Expense Form with Budget Pre-Check Warning
         with col_exp:
             st.subheader("Add expense")
             with st.form("add_expense_form", clear_on_submit=True):
@@ -990,17 +1336,30 @@ def main_app():
                 sub_exp = st.form_submit_button("Add expense", type="primary", use_container_width=True)
             if sub_exp:
                 final_cat = new_cat_exp.strip() or cat_exp
+                exp_month = dt_exp.strftime("%Y-%m")
+                
+                # Check if this expense exceeds budget
                 conn = sqlite3.connect(DB_FILE)
+                conn.row_factory = sqlite3.Row
                 c = conn.cursor()
                 if new_cat_exp.strip() and final_cat not in all_cats:
                     c.execute("INSERT OR IGNORE INTO categories (user_id, name) VALUES (?, ?)", (uid, final_cat))
+                
+                # Check category budget
+                cat_b = c.execute("SELECT amount FROM budgets WHERE user_id = ? AND month = ? AND category = ?", (uid, exp_month, final_cat)).fetchone()
+                cur_cat_spent = c.execute("SELECT sum(amount) FROM transactions WHERE user_id = ? AND strftime('%Y-%m', txn_date) = ? AND category = ? AND kind = 'Expense'", (uid, exp_month, final_cat)).fetchone()[0] or 0.0
+                
                 c.execute(
                     "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (uid, dt_exp.isoformat(), amt_exp, "Expense", final_cat, note_exp, datetime.now(timezone.utc).isoformat()),
                 )
                 conn.commit()
                 conn.close()
-                st.success("Expense saved.")
+
+                if cat_b and (cur_cat_spent + amt_exp) > float(cat_b["amount"]):
+                    st.warning(f"⚠️ Budget Alert: This entry brings your '{final_cat}' spending to {money(cur_cat_spent + amt_exp, symbol)}, exceeding your set budget of {money(cat_b['amount'], symbol)}!")
+                else:
+                    st.success("Expense saved.")
                 st.rerun()
                 
         # Filter row
@@ -1008,16 +1367,19 @@ def main_app():
         if df.empty:
             st.info("No recorded transactions yet.")
         else:
-            f1, f2, f3 = st.columns([1, 1, 1.5])
-            start_date = f1.date_input("From", value=today.replace(day=1), key="filter-from")
+            f1, f2, f3, f4 = st.columns([1, 1, 1.2, 1.3])
+            start_date = f1.date_input("From", value=today - timedelta(days=90), key="filter-from")
             end_date = f2.date_input("To", value=today, key="filter-to")
             selected_filter_cat = f3.selectbox("Category", ["All categories"] + all_cats, key="filter-cat")
+            search_query = f4.text_input("Search description", placeholder="Filter by notes...", key="filter-search")
             
             filtered = df[(df.date >= start_date) & (df.date <= end_date)]
             if selected_filter_cat != "All categories":
                 filtered = filtered[filtered.category == selected_filter_cat]
+            if search_query.strip():
+                filtered = filtered[filtered.description.astype(str).str.contains(search_query.strip(), case=False, na=False)]
                 
-            st.caption(f"{len(filtered)} recorded entr{'y' if len(filtered) == 1 else 'ies'}")
+            st.caption(f"{len(filtered)} recorded entr{'y' if len(filtered) == 1 else 'ies'} found in selected period.")
             
             # Edit Transaction Form
             edit_id = st.session_state.get("edit_transaction_id")
@@ -1037,7 +1399,6 @@ def main_app():
                         btn_save = st.form_submit_button("Save changes", type="primary")
                     if btn_save:
                         conn = sqlite3.connect(DB_FILE)
-                        # If adjusting savings contribution linked to goal
                         if pd.notna(r_curr.get("goal_id")) and r_curr.category == "Savings contribution":
                             gid = int(r_curr.goal_id)
                             conn.row_factory = sqlite3.Row
@@ -1090,7 +1451,7 @@ def main_app():
                 st.success("Budget saved.")
                 st.rerun()
                 
-            st.markdown("#### Existing budgets")
+            st.markdown("#### Configured budgets")
             budgets_all = get_budgets_list(uid)
             if not budgets_all:
                 st.caption("No budgets recorded yet.")
@@ -1254,7 +1615,6 @@ def main_app():
                     mime="text/csv",
                 )
                 
-                # PDF Export using reportlab
                 try:
                     from reportlab.lib import colors
                     from reportlab.lib.pagesizes import letter
