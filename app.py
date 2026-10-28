@@ -8,7 +8,8 @@ import plotly.express as px
 import streamlit as st
 from postgrest.exceptions import APIError
 from supabase import AuthApiError, create_client
-import streamlit as st
+
+st.set_page_config(page_title="Pennywise · Personal Finance",page_icon="🌱",layout="wide",initial_sidebar_state="collapsed")
 
 # Inject custom CSS to hide the header bar and collapse the top padding
 st.markdown(
@@ -19,6 +20,12 @@ st.markdown(
         visibility: hidden;
         height: 0%;
     }
+    [data-testid="stToolbar"], .stDeployButton {
+        display: none !important;
+    }
+    #MainMenu, footer, [data-testid="stStatusWidget"], .viewerBadge_container__1QSob {
+        display: none !important;
+    }
     
     /* Remove the default top padding to bring content up */
     .stAppViewBlockContainer {
@@ -28,69 +35,11 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-import streamlit as st
 
-st.markdown(
-    """
-    <style>
-        /* 1. Fix Top Bar Alignment & Mobile Distortion */
-        /* Target the header container where Streamlit and custom top elements sit */
-        header[data-testid="stHeader"] {
-            background-color: transparent !important;
-        }
-        
-        /* Adjust main app container padding for cleaner top alignment */
-        .block-container {
-            padding-top: 2rem !important;
-            padding-bottom: 3rem !important;
-        }
-
-        /* Responsive adjustments for the top navigation bar / title area */
-        @media (max-width: 768px) {
-            /* Stack or adjust spacing for mobile viewports */
-            .stApp header {
-                padding: 0 0.5rem;
-            }
-        }
-
-        /* 2. Hide the "Manage app" badge / Streamlit footer elements on bottom right */
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        .stDeployButton {display: none !important;}
-        div[data-testid="stStatusWidget"] {
-            visibility: hidden !important;
-            display: none !important;
-        }
-        /* Specific selector for Streamlit Community Cloud floating badges */
-        .viewerBadge_container__1QSob, 
-        iframe[title="Streamlit App"], 
-        section[data-testid="stSidebarNav"] + div div iframe {
-            display: none !important;
-        }
-
-        /* 3. Style / Clean up transaction delete and edit signs */
-        /* If delete buttons or icons look misaligned */
-        button[kind="secondary"] {
-            border-radius: 6px;
-            border: 1px solid #e0e0e0;
-            transition: all 0.2s ease;
-        }
-        
-        /* Improve spacing for transaction rows */
-        div[data-testid="column"] {
-            display: flex;
-            align-items: center;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
 CATEGORIES=["Food","Transport","Utilities","Education","Shopping","Entertainment","Housing","Health","Salary","Freelance","Other","Savings contribution"]
 CURRENCIES={"PKR · Rs":"Rs","USD · $":"$","EUR · €":"€","GBP · £":"£","INR · ₹":"₹","AED · د.إ":"د.إ"}
 GREEN="#245f4d"
-
-st.set_page_config(page_title="Pennywise · Personal Finance",page_icon="🌱",layout="wide",initial_sidebar_state="collapsed")
 
 def get_client():
     if "supabase_client" not in st.session_state:
@@ -111,6 +60,14 @@ def get_client():
 
 def signed_in_user_id():
     return st.session_state.user_id
+
+def valid_password(password):
+    return (
+        len(password)>=8
+        and any(char.isalpha() for char in password)
+        and any(char.isdigit() for char in password)
+        and any(not char.isalnum() for char in password)
+    )
 
 def ensure_profile(user_id,default_currency="Rs"):
     if default_currency not in CURRENCIES.values():
@@ -266,15 +223,16 @@ def css():
     @media(max-width:700px){
       .block-container{padding-left:14px!important;padding-right:14px!important;padding-top:.35rem!important}
       .hero{display:block;padding:20px;border-radius:20px}.hero-box{margin-top:16px;min-width:0}.hero-value{font-size:2rem}.hero h2{font-size:1.65rem}
-      /* Give the brand its own line; group month and sign-out without stacking controls. */
+      /* Keep the brand on its own line and align month/account controls below it. */
       [data-testid="stHorizontalBlock"]:has(.brand){display:grid!important;grid-template-columns:minmax(0,1fr) auto!important;align-items:center!important;gap:5px 8px!important}
       [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]{width:auto!important;min-width:0!important;flex:none!important}
       [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:first-child{grid-column:1/-1}
-      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(3){display:none!important}
-      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(4) [data-testid="stHorizontalBlock"]{display:flex!important;flex-wrap:nowrap!important;align-items:center!important;justify-content:flex-end!important;gap:5px!important}
-      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(4) [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]:first-child{flex:0 0 34px!important;width:34px!important;min-width:34px!important}
-      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(4) [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]:last-child{flex:0 0 auto!important;width:auto!important;min-width:0!important}
-      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(4) button{white-space:nowrap!important;padding:.3rem .5rem!important;font-size:.8rem!important}
+      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(2){grid-column:1}
+      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(3){grid-column:2}
+      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(3) [data-testid="stHorizontalBlock"]{display:flex!important;flex-wrap:nowrap!important;align-items:center!important;justify-content:flex-end!important;gap:5px!important}
+      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(3) [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]:first-child{flex:0 0 34px!important;width:34px!important;min-width:34px!important}
+      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(3) [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]:last-child{flex:0 0 auto!important;width:auto!important;min-width:0!important}
+      [data-testid="stHorizontalBlock"]:has(.brand)>[data-testid="stColumn"]:nth-child(3) button{white-space:nowrap!important;padding:.3rem .5rem!important;font-size:.8rem!important}
       [role="radiogroup"]{width:100%;overflow-x:auto;justify-content:flex-start;flex-wrap:nowrap;scrollbar-width:none}
       [role="radiogroup"] label{flex:0 0 auto;font-size:.82rem!important;padding:6px 8px!important}
       [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]){display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px!important}
@@ -325,9 +283,9 @@ def auth():
                             st.error(f"Could not start the demo: {exc}")
         with signup:
             with st.form("signup"):
-                email=st.text_input("Email address",key="signup-email"); password=st.text_input("Password",type="password",key="signup-password",help="Use at least 8 characters."); currency=st.selectbox("Currency",list(CURRENCIES),key="signup-currency"); go=st.form_submit_button("Create account",type="primary",use_container_width=True)
+                email=st.text_input("Email address",key="signup-email"); password=st.text_input("Password",type="password",key="signup-password",help="At least 8 characters, including one letter, one number, and one special character."); currency=st.selectbox("Currency",list(CURRENCIES),key="signup-currency"); go=st.form_submit_button("Create account",type="primary",use_container_width=True)
             if go:
-                if len(password)<8: st.error("Choose a password with at least 8 characters.")
+                if not valid_password(password): st.error("Use at least 8 characters, including one letter, one number, and one special character.")
                 else:
                     try:
                         response=get_client().auth.sign_up({"email":email.strip(),"password":password,"options":{"data":{"currency":CURRENCIES[currency]}}})
@@ -364,7 +322,7 @@ def transaction_row(r,symbol,show_actions=True):
     cols[2].markdown(f"<div style='text-align:right;color:{color};font-weight:600'>{sign}{money(r.amount,symbol)}</div>",unsafe_allow_html=True)
     if show_actions:
         if cols[3].button("✎",key=f"edit-{int(r.id)}",help="Edit transaction"): st.session_state.edit_transaction_id=int(r.id); st.rerun()
-        if cols[4].button("♲",key=f"delete-{int(r.id)}",help="Delete transaction"):
+        if cols[4].button("🗑️",key=f"delete-{int(r.id)}",help="Delete transaction"):
             client=get_client(); uid=signed_in_user_id()
             if pd.notna(r.goal_id):
                 goal=client.table("goals").select("saved").eq("id",int(r.goal_id)).eq("user_id",uid).execute().data
@@ -375,23 +333,30 @@ def transaction_row(r,symbol,show_actions=True):
 
 def add_transaction_form(uid,cats,symbol,kind):
     with st.form(f"add-{kind}",clear_on_submit=True):
-        a,b,c=st.columns(3); dt=a.date_input("Date",value=date.today()); amount=b.number_input(f"Amount ({symbol})",min_value=.01,step=100.0); category=c.selectbox("Category",[x for x in cats if x not in ["Savings contribution","Salary","Freelance"]] if kind=="Expense" else [x for x in cats if x!="Savings contribution"])
+        available_categories=[x for x in cats if x not in ["Savings contribution","Salary","Freelance"]] if kind=="Expense" else [x for x in cats if x!="Savings contribution"]
+        a,b,c=st.columns(3); dt=a.date_input("Date",value=date.today()); amount=b.number_input(f"Amount ({symbol})",min_value=.01,step=100.0); category=c.selectbox("Category",available_categories)
+        new_category=st.text_input("Or create a new category (optional)",placeholder="e.g. Pet care")
         note=st.text_input("Description or notes",placeholder="e.g. Weekly groceries"); saved=st.form_submit_button(f"Add {kind.lower()}",type="primary",use_container_width=True)
     if saved:
-        get_client().table("transactions").insert({"user_id":uid,"txn_date":dt.isoformat(),"amount":amount,"kind":kind,"category":category,"note":note,"created_at":datetime.now(timezone.utc).isoformat()}).execute()
+        client=get_client()
+        category=new_category.strip() or category
+        if new_category.strip() and category not in CATEGORIES:
+            try:
+                client.table("categories").insert({"user_id":uid,"name":category}).execute()
+            except APIError as exc:
+                if exc.code!="23505": raise
+        client.table("transactions").insert({"user_id":uid,"txn_date":dt.isoformat(),"amount":amount,"kind":kind,"category":category,"note":note,"created_at":datetime.now(timezone.utc).isoformat()}).execute()
         st.success(f"{kind} saved."); st.rerun()
 
 def app():
     css(); uid=st.session_state.user_id
     symbol=ensure_profile(uid)
     month_options=[(date.today().replace(day=1)-pd.DateOffset(months=i)).date() for i in range(18)]
-    brand,monthcol,bell,account=st.columns([3.2,2.5,.55,1.4],vertical_alignment="center")
+    brand,monthcol,account=st.columns([3,2,1.7],vertical_alignment="center")
     with brand: st.markdown('<div class="brand"><span class="brand-mark">eco</span>Pennywise</div>',unsafe_allow_html=True)
     with monthcol: month=st.selectbox("Month",month_options,format_func=lambda d:d.strftime("%B %Y"),label_visibility="collapsed",key="top-month")
-    with bell:
-        if st.button("♧",help="Notifications",use_container_width=True): st.toast("You're all caught up.")
     with account:
-        av,signout=st.columns([.75,1.5],vertical_alignment="center"); av.markdown(f"<div style='background:#e7eee3;color:#245f4d;border-radius:50%;width:34px;height:34px;text-align:center;padding-top:6px;font-weight:700'>{html.escape(st.session_state.user_email[0].upper())}</div>",unsafe_allow_html=True)
+        av,signout=st.columns([.5,1.5],vertical_alignment="center"); av.markdown(f"<div style='background:#e7eee3;color:#245f4d;border-radius:50%;width:34px;height:34px;text-align:center;padding-top:6px;font-weight:700'>{html.escape(st.session_state.user_email[0].upper())}</div>",unsafe_allow_html=True)
         if signout.button("Sign out",key="signout"):
             get_client().auth.sign_out()
             st.session_state.clear()
@@ -579,9 +544,39 @@ def app():
             try:
                 get_client().table("categories").insert({"user_id":uid,"name":category.strip()}).execute()
                 st.success("Category added.")
+                st.rerun()
             except APIError as exc:
                 if exc.code=="23505": st.error("That category already exists.")
                 else: st.error(f"Could not add category: {exc.message}")
+        custom_categories=sorted(row["name"] for row in account_rows("categories","name"))
+        if custom_categories:
+            st.markdown("### Rename a custom category")
+            with st.form("rename-category"):
+                old_category=st.selectbox("Category to rename",custom_categories)
+                renamed_category=st.text_input("New category name",value=old_category)
+                rename=st.form_submit_button("Save category name")
+            if rename:
+                new_category=renamed_category.strip()
+                if not new_category:
+                    st.error("Category name cannot be empty.")
+                elif new_category!=old_category and (new_category in CATEGORIES or new_category in custom_categories):
+                    st.error("A category with that name already exists.")
+                elif new_category!=old_category:
+                    client=get_client()
+                    old_budgets=client.table("budgets").select("month").eq("user_id",uid).eq("category",old_category).execute().data
+                    new_budgets=client.table("budgets").select("month").eq("user_id",uid).eq("category",new_category).execute().data
+                    conflicting_months={row["month"] for row in old_budgets}&{row["month"] for row in new_budgets}
+                    if conflicting_months:
+                        st.error("This category cannot be renamed because a budget already exists for the new name in one or more months.")
+                    else:
+                        try:
+                            client.table("transactions").update({"category":new_category}).eq("user_id",uid).eq("category",old_category).execute()
+                            client.table("budgets").update({"category":new_category}).eq("user_id",uid).eq("category",old_category).execute()
+                            client.table("categories").update({"name":new_category}).eq("user_id",uid).eq("name",old_category).execute()
+                            st.success("Category renamed.")
+                            st.rerun()
+                        except APIError as exc:
+                            st.error(f"Could not rename the category: {exc.message}")
         st.markdown("### Backup and restore")
         payload={"users":[{"email":st.session_state.user_email,"currency":symbol}]}
         payload["transactions"]=account_rows("transactions","id,txn_date,amount,kind,category,note,created_at,goal_id")

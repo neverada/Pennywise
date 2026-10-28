@@ -4,6 +4,8 @@ A Streamlit personal finance dashboard inspired by the supplied Pennywise design
 
 Adding an initial amount to a new savings goal or recording a later contribution also creates a dated **Savings contribution** entry in the transaction history. These transfers remain visible and exportable, while staying out of spending and category totals. Editing or deleting a linked contribution also adjusts the goal balance.
 
+Create custom categories directly while adding a transaction, or rename them in **Settings**; renaming also updates matching transactions and budgets. New account passwords must be at least 8 characters and include a letter, a number, and a special character.
+
 ## Run it
 
 1. Install Python 3.10 or newer.
