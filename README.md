@@ -27,7 +27,17 @@ Adding an initial amount to a new savings goal or recording a later contribution
 4. Install the packages: `python -m pip install -r requirements.txt`
 5. Start the app: `streamlit run app.py`, then create an account or sign in.
 
-The app does not create or manage the Supabase schema automatically; apply the SQL file before first use. In Supabase Dashboard, enable **Allow anonymous sign-ins** under **Authentication → Sign In / Providers → Anonymous** to use the demo button. Each demo visit creates a separate anonymous account and seeds its own sample transactions, budgets, and savings goal. The demo account and its records are temporary to that visitor's session; do not use demo sign-in for personal data. All table operations use the signed-in Supabase client, and the database policies independently enforce ownership using `auth.uid()`.
+The app does not create or manage the Supabase schema automatically; apply the complete [`supabase_schema.sql`](./supabase_schema.sql) file in the Supabase SQL Editor before first use. The SQL creates `profiles` and the other app tables, ownership policies, and the demo/backup functions. If the app reports `PGRST205` or a missing `public.profiles` table, verify that the SQL was run successfully in the same project identified by `SUPABASE_URL` and `SUPABASE_KEY`.
+
+In Supabase Dashboard, enable **Allow anonymous sign-ins** under **Authentication → Sign In / Providers → Anonymous** to use the demo button. Each demo visit creates a separate anonymous account and seeds its own sample transactions, budgets, and savings goal. The demo account and its records are temporary to that visitor's session; do not use demo sign-in for personal data. All table operations use the signed-in Supabase client, and the database policies independently enforce ownership using `auth.uid()`.
+
+### Email confirmation troubleshooting
+
+- In **Authentication → URL Configuration**, set **Site URL** to the actual Pennywise app URL. For local runs this is usually `http://localhost:8501`; for deployment use the deployed app URL.
+- Add the app URL (and local development URL, if used) to **Redirect URLs**. A confirmation email can be delivered successfully but redirect to the wrong host if the project URL configuration still points to a different or old app address.
+- Keep the confirmation email template's verification link configured to use Supabase's `{{ .ConfirmationURL }}`. Check the URL Configuration and Auth logs if a link errors or redirects somewhere unexpected.
+- Check spam/junk and Supabase Auth logs for delivery failures. Supabase's built-in email sender is intended for limited testing and is rate-limited; configure a verified custom SMTP provider in the project's Auth SMTP settings for reliable delivery to users.
+- The **Create account** tab has a **Resend confirmation email** action if the original message does not arrive. Supabase may still enforce its email rate limits.
 
 ## Bank CSV format
 

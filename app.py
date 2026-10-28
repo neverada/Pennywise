@@ -65,6 +65,10 @@ def ensure_profile(user_id,default_currency="Rs"):
     client.table("profiles").upsert({"id":user_id,"currency":default_currency},on_conflict="id").execute()
     return default_currency
 
+def show_schema_setup_error():
+    st.error("The Pennywise tables are missing from this Supabase project's schema.")
+    st.markdown("Open the Supabase **SQL Editor**, run the complete `supabase_schema.sql` file from this project, then retry. Make sure this app is configured with the same Supabase project.")
+
 def account_rows(table,columns="*"):
     return get_client().table(table).select(columns).eq("user_id",signed_in_user_id()).execute().data
 
@@ -256,7 +260,12 @@ def auth():
                         start_demo_session()
                         st.rerun()
                     except (AuthApiError,APIError,ValueError) as exc:
-                        st.error(f"Could not start the demo: {exc}. Make sure anonymous sign-ins are enabled in Supabase Auth and the latest database schema has been applied.")
+                        if isinstance(exc,APIError) and exc.code=="PGRST205":
+                            show_schema_setup_error()
+                        elif isinstance(exc,AuthApiError) and "anonymous sign-ins are disabled" in exc.message.lower():
+                            st.error("Could not start the demo because anonymous sign-ins are disabled. In Supabase, enable **Allow anonymous sign-ins** under **Authentication → Sign In / Providers → Anonymous**, then retry.")
+                        else:
+                            st.error(f"Could not start the demo: {exc}")
         with signup:
             with st.form("signup"):
                 email=st.text_input("Email address",key="signup-email"); password=st.text_input("Password",type="password",key="signup-password",help="Use at least 8 characters."); currency=st.selectbox("Currency",list(CURRENCIES),key="signup-currency"); go=st.form_submit_button("Create account",type="primary",use_container_width=True)
@@ -270,9 +279,21 @@ def auth():
                             st.session_state.user_email=response.user.email or email.strip()
                             ensure_profile(response.user.id,CURRENCIES[currency])
                             st.rerun()
-                        st.success("Account created. Check your email to confirm your address, then sign in.")
+                        st.success("Account created. Check your inbox and spam folder for the confirmation email, then sign in. If it does not arrive, use the resend option below.")
                     except AuthApiError as exc:
                         st.error(f"Could not create the account: {exc.message}")
+            with st.form("resend-confirmation"):
+                resend_email=st.text_input("Email address for confirmation resend")
+                resend=st.form_submit_button("Resend confirmation email")
+            if resend:
+                if not resend_email.strip():
+                    st.error("Enter the email address you used to create your account.")
+                else:
+                    try:
+                        get_client().auth.resend({"type":"signup","email":resend_email.strip()})
+                        st.success("If this address has a pending confirmation, Supabase has sent another email. Check your inbox and spam folder.")
+                    except AuthApiError as exc:
+                        st.error(f"Could not resend the confirmation email: {exc.message}")
         st.info("Your account uses Supabase Auth. You can download or restore your own account data from Settings.")
 
 def transaction_row(r,symbol,show_actions=True):
@@ -530,7 +551,13 @@ def main():
     except ValueError as exc:
         st.error(str(exc))
         st.stop()
-    if "user_id" not in st.session_state: auth()
-    else: app()
+    try:
+        if "user_id" not in st.session_state: auth()
+        else: app()
+    except APIError as exc:
+        if exc.code=="PGRST205":
+            show_schema_setup_error()
+            st.stop()
+        raise
 
 if __name__=="__main__": main()
