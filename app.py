@@ -51,6 +51,7 @@ GREEN = "#245f4d"
 ORANGE = "#e9a251"
 RED_ALERT = "#dc2626"
 DB_FILE = "pennywise.db"
+TRANSACTIONS_PAGE_SIZE = 25
 
 # ---------------------------------------------------------------------------
 # Database & Storage Layer (Supports SQLite local storage & Supabase)
@@ -283,16 +284,16 @@ def get_custom_categories(uid: str) -> List[str]:
 # ---------------------------------------------------------------------------
 
 def seed_sample_data(uid: str, force_reset: bool = False):
-    """Populates 115+ realistic transactions spanning three months with budgets and savings goals."""
+    """Populate the explicitly requested demo; never replace an existing ledger implicitly."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     count = c.execute("SELECT count(*) FROM transactions WHERE user_id = ?", (uid,)).fetchone()[0]
-    if count >= 100 and not force_reset:
+    if count and not force_reset:
         conn.close()
         return
 
-    # Clear existing demo data for clean re-seed
-    if force_reset or count < 100:
+    # Only an explicit demo reset may erase existing records.
+    if force_reset:
         c.execute("DELETE FROM transactions WHERE user_id = ?", (uid,))
         c.execute("DELETE FROM budgets WHERE user_id = ?", (uid,))
         c.execute("DELETE FROM goals WHERE user_id = ?", (uid,))
@@ -876,7 +877,6 @@ def auth_view():
                 st.session_state.user_id = str(user["id"])
                 st.session_state.user_email = user["email"]
                 st.session_state.user_currency = user["currency"]
-                seed_sample_data(str(user["id"]), force_reset=False)
                 st.rerun()
                 
             with st.expander("Explore the instant demo account", expanded=True):
@@ -925,7 +925,6 @@ def auth_view():
                     st.session_state.user_id = uid
                     st.session_state.user_email = new_email.strip()
                     st.session_state.user_currency = curr_symbol
-                    seed_sample_data(uid, force_reset=True)
                     st.success("Account created successfully!")
                     st.rerun()
 
@@ -933,11 +932,13 @@ def main_app():
     inject_custom_css()
     uid = signed_in_user_id()
     user_email = st.session_state.get("user_email", "User")
-    symbol = get_profile_currency(uid, st.session_state.get("user_currency", "Rs"))
-    
-    # Check if demo has at least 100 transactions, seed if needed
-    seed_sample_data(uid, force_reset=False)
-    
+    # A remote profile lookup on every widget interaction adds a network round-trip.
+    # Refresh it once per signed-in user; Settings keeps the session value in sync.
+    if st.session_state.get("_currency_loaded_for") != uid:
+        st.session_state.user_currency = get_profile_currency(uid, st.session_state.get("user_currency", "Rs"))
+        st.session_state["_currency_loaded_for"] = uid
+    symbol = st.session_state.user_currency
+
     # 18 months options for top bar
     today = date.today()
     month_options = [(today.replace(day=1) - pd.DateOffset(months=i)).date() for i in range(18)]
@@ -977,8 +978,10 @@ def main_app():
         key="main-nav-radio",
     )
     
-    df = get_transactions_df(uid)
-    custom_cats = get_custom_categories(uid)
+    # Streamlit reruns this function on every interaction. Only query data needed
+    # by the active tab (particularly important when Supabase is configured).
+    df = get_transactions_df(uid) if current_tab in ("Overview", "Transactions", "Import & export") else None
+    custom_cats = get_custom_categories(uid) if current_tab in ("Transactions", "Budgets & goals", "Settings") else []
     all_cats = sorted(set(CATEGORIES + custom_cats))
 
     # -----------------------------------------------------------------------
@@ -1419,10 +1422,27 @@ def main_app():
                         st.session_state.edit_transaction_id = None
                         st.rerun()
                         
-            # Transaction list
-            for _, r in filtered.iterrows():
-                transaction_row_ui(r, symbol, show_actions=True)
-                st.markdown('<div class="txn-row-rule"></div>', unsafe_allow_html=True)
+            # Keep the number of Streamlit widgets bounded: two buttons and
+            # several layout elements per row otherwise make reruns very slow.
+            filters = (start_date, end_date, selected_filter_cat, search_query.strip())
+            if st.session_state.get("_ledger_filters") != filters:
+                st.session_state["_ledger_filters"] = filters
+                st.session_state["ledger-page"] = 1
+            page_count = max(1, math.ceil(len(filtered) / TRANSACTIONS_PAGE_SIZE))
+            if st.session_state.get("ledger-page", 1) > page_count:
+                st.session_state["ledger-page"] = page_count
+            if filtered.empty:
+                st.info("No transactions match these filters.")
+            else:
+                page = (
+                    st.number_input("Page", min_value=1, max_value=page_count, step=1, key="ledger-page")
+                    if page_count > 1 else 1
+                )
+                start = (page - 1) * TRANSACTIONS_PAGE_SIZE
+                st.caption(f"Showing {start + 1}–{min(start + TRANSACTIONS_PAGE_SIZE, len(filtered))} of {len(filtered)}")
+                for _, r in filtered.iloc[start:start + TRANSACTIONS_PAGE_SIZE].iterrows():
+                    transaction_row_ui(r, symbol, show_actions=True)
+                    st.markdown('<div class="txn-row-rule"></div>', unsafe_allow_html=True)
 
     # -----------------------------------------------------------------------
     # TAB 3: BUDGETS & GOALS
