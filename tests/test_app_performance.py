@@ -28,7 +28,10 @@ class AppPerformanceTests(unittest.TestCase):
 
     def sign_in_test_user(self):
         with sqlite3.connect("pennywise.db") as conn:
-            uid = conn.execute("INSERT INTO users (email) VALUES ('test@example.com')").lastrowid
+            uid = conn.execute(
+                "INSERT INTO users (email, password_hash, salt, currency, created_at) "
+                "VALUES ('test@example.com', '', '', 'Rs', '2026-11-08')"
+            ).lastrowid
         self.app.session_state["user_id"] = str(uid)
         self.app.session_state["user_email"] = "test@example.com"
         self.app.session_state["user_currency"] = "Rs"

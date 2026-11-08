@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import io
 import json
+import logging
 import math
 import os
+import secrets
 import sqlite3
 import tempfile
 from datetime import date, datetime, timedelta, timezone
@@ -52,6 +55,7 @@ ORANGE = "#e9a251"
 RED_ALERT = "#dc2626"
 DB_FILE = "pennywise.db"
 TRANSACTIONS_PAGE_SIZE = 25
+PASSWORD_ITERATIONS = 600_000
 
 # ---------------------------------------------------------------------------
 # Database & Storage Layer (Supports SQLite local storage & Supabase)
@@ -65,10 +69,19 @@ def init_sqlite_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
-            currency TEXT NOT NULL DEFAULT 'Rs'
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'Rs',
+            created_at TEXT NOT NULL
         )
         """
     )
+    # Earlier installs created a users table without these columns. Add them
+    # without deleting existing accounts; the bundled database already has them.
+    user_columns = {row[1] for row in c.execute("PRAGMA table_info(users)")}
+    for column in ("password_hash", "salt", "created_at"):
+        if column not in user_columns:
+            c.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
     c.execute(
         """
         CREATE TABLE IF NOT EXISTS transactions (
@@ -122,6 +135,36 @@ def init_sqlite_db():
     conn.close()
 
 init_sqlite_db()
+
+def insert_local_user(conn: sqlite3.Connection, email: str, currency: str, password: str) -> str:
+    """Insert an account using the columns required by both new and bundled DBs."""
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt), PASSWORD_ITERATIONS
+    ).hex()
+    password_hash = f"pbkdf2_sha256${PASSWORD_ITERATIONS}${digest}"
+    row = conn.execute(
+        "INSERT INTO users (email, password_hash, salt, currency, created_at) VALUES (?, ?, ?, ?, ?)",
+        (email, password_hash, salt, currency, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    return str(row.lastrowid)
+
+def check_local_password(password: str, password_hash: str, salt: str) -> Optional[bool]:
+    """Return None for old rows whose password scheme was not recorded."""
+    if not password_hash.startswith("pbkdf2_sha256$"):
+        return None
+    try:
+        _, rounds, expected = password_hash.split("$", 2)
+        iterations = int(rounds)
+        if not 1 <= iterations <= 1_000_000:
+            return False
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), bytes.fromhex(salt), iterations
+        ).hex()
+        return secrets.compare_digest(actual, expected)
+    except (ValueError, TypeError):
+        return False
 
 def has_supabase_configured() -> bool:
     try:
@@ -867,17 +910,27 @@ def auth_view():
             if go:
                 conn = sqlite3.connect(DB_FILE)
                 conn.row_factory = sqlite3.Row
-                user = conn.execute("SELECT id, email, currency FROM users WHERE lower(email) = lower(?)", (email.strip(),)).fetchone()
+                try:
+                    user = conn.execute(
+                        "SELECT id, email, currency, password_hash, salt FROM users WHERE lower(email) = lower(?)",
+                        (email.strip(),),
+                    ).fetchone()
+                finally:
+                    conn.close()
                 if not user:
-                    c = conn.cursor()
-                    c.execute("INSERT INTO users (email, currency) VALUES (?, ?)", (email.strip(), "Rs"))
-                    conn.commit()
-                    user = conn.execute("SELECT id, email, currency FROM users WHERE id = ?", (c.lastrowid,)).fetchone()
-                conn.close()
-                st.session_state.user_id = str(user["id"])
-                st.session_state.user_email = user["email"]
-                st.session_state.user_currency = user["currency"]
-                st.rerun()
+                    st.error("Account not found. Create an account or start the instant demo.")
+                else:
+                    verified = check_local_password(password, user["password_hash"], user["salt"])
+                    if verified is False:
+                        st.error("Incorrect email or password.")
+                    else:
+                        # Bundled/older accounts have hashes from an unknown format.
+                        # Keep them accessible but make the lack of verification visible.
+                        st.session_state["_legacy_login"] = verified is None
+                        st.session_state.user_id = str(user["id"])
+                        st.session_state.user_email = user["email"]
+                        st.session_state.user_currency = user["currency"]
+                        st.rerun()
                 
             with st.expander("Explore the instant demo account", expanded=True):
                 st.caption("Try Pennywise with 100+ transactions spanning August, September, and October, monthly budgets, and savings goals.")
@@ -885,17 +938,17 @@ def auth_view():
                     conn = sqlite3.connect(DB_FILE)
                     conn.row_factory = sqlite3.Row
                     demo = conn.execute("SELECT id, email, currency FROM users WHERE lower(email) = 'demo@pennywise.app'").fetchone()
-                    if not demo:
-                        c = conn.cursor()
-                        c.execute("INSERT INTO users (email, currency) VALUES ('demo@pennywise.app', 'Rs')")
-                        conn.commit()
-                        demo_id = str(c.lastrowid)
-                    else:
-                        demo_id = str(demo["id"])
-                    conn.close()
+                    try:
+                        demo_id = (
+                            str(demo["id"]) if demo else
+                            insert_local_user(conn, "demo@pennywise.app", "Rs", "password123!")
+                        )
+                    finally:
+                        conn.close()
                     st.session_state.user_id = demo_id
                     st.session_state.user_email = "demo@pennywise.app"
                     st.session_state.user_currency = "Rs"
+                    st.session_state["_legacy_login"] = False
                     seed_sample_data(demo_id, force_reset=True)
                     st.rerun()
 
@@ -906,30 +959,48 @@ def auth_view():
                 selected_curr = st.selectbox("Preferred currency", list(CURRENCIES), key="su-curr")
                 create_btn = st.form_submit_button("Create account", type="primary", use_container_width=True)
             if create_btn:
-                if not new_email.strip():
+                email_clean = new_email.strip()
+                if not email_clean or "@" not in email_clean:
                     st.error("Please enter a valid email address.")
+                elif len(new_password) < 8:
+                    st.error("Password must be at least 8 characters.")
                 else:
                     curr_symbol = CURRENCIES[selected_curr]
                     conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
+                    uid = None
                     try:
-                        c.execute("INSERT INTO users (email, currency) VALUES (?, ?)", (new_email.strip(), curr_symbol))
-                        conn.commit()
-                        uid = str(c.lastrowid)
+                        existing = conn.execute(
+                            "SELECT id FROM users WHERE lower(email) = lower(?)", (email_clean,)
+                        ).fetchone()
+                        if existing:
+                            st.error("An account with this email already exists. Sign in instead.")
+                        else:
+                            uid = insert_local_user(conn, email_clean, curr_symbol, new_password)
                     except sqlite3.IntegrityError:
-                        c.execute("UPDATE users SET currency = ? WHERE lower(email) = lower(?)", (curr_symbol, new_email.strip()))
-                        conn.commit()
-                        row = conn.execute("SELECT id FROM users WHERE lower(email) = lower(?)", (new_email.strip(),)).fetchone()
-                        uid = str(row[0])
-                    conn.close()
-                    st.session_state.user_id = uid
-                    st.session_state.user_email = new_email.strip()
-                    st.session_state.user_currency = curr_symbol
-                    st.success("Account created successfully!")
-                    st.rerun()
+                        conn.rollback()
+                        logging.exception("Account creation failed due to a database constraint")
+                        st.error("Could not create this account. Check if the email is already in use.")
+                    except sqlite3.Error:
+                        conn.rollback()
+                        logging.exception("Account creation failed due to a database error")
+                        st.error("Could not create this account. Please check the app logs.")
+                    finally:
+                        conn.close()
+                    if uid is not None:
+                        st.session_state.user_id = uid
+                        st.session_state.user_email = email_clean
+                        st.session_state.user_currency = curr_symbol
+                        st.session_state["_legacy_login"] = False
+                        st.success("Account created successfully!")
+                        st.rerun()
 
 def main_app():
     inject_custom_css()
+    if st.session_state.get("_legacy_login"):
+        st.warning(
+            "This older account uses an unsupported password format, so its password was not verified. "
+            "Do not store sensitive data here; back up your records and migrate to a new account."
+        )
     uid = signed_in_user_id()
     user_email = st.session_state.get("user_email", "User")
     # A remote profile lookup on every widget interaction adds a network round-trip.
