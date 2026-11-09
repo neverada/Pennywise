@@ -926,8 +926,6 @@ def complete_supabase_login(client: Any, user: Any, default_currency: str = "Rs"
     st.session_state["user_email"] = user.email or "User"
     st.session_state["user_currency"] = currency
     st.session_state["_currency_loaded_for"] = uid
-    for key in ("_migration_uid", "_migration_email", "_migration_currency"):
-        st.session_state.pop(key, None)
     st.rerun()
 
 
@@ -956,7 +954,7 @@ def auth_view():
         )
         st.caption("The instant demo is local sample data, not part of a Supabase account.")
         if cloud_enabled:
-            st.info("With the Supabase schema installed, accounts sync across devices. Export old local data before redeploying.")
+            st.info("With the Supabase schema installed, accounts sync across devices. ")
         elif config_state == "incomplete":
             st.error("Supabase settings are incomplete. Sign-in and account creation are disabled; only the local demo works.")
         else:
@@ -1102,52 +1100,6 @@ def auth_view():
                             st.session_state["auth_mode"] = "local"
                             st.success("Account created successfully!")
                             st.rerun()
-
-        if cloud_enabled:
-            with st.expander("Export an old local account before migrating"):
-                st.caption(
-                    "Only accounts with a verifiable local password can be exported here. "
-                    "Download this before redeploying; server-local data may disappear on restart. "
-                    "After Supabase sign-in, restore the JSON under Settings."
-                )
-                migration_uid = st.session_state.get("_migration_uid")
-                if migration_uid:
-                    payload = local_backup_payload(
-                        migration_uid,
-                        st.session_state["_migration_email"],
-                        st.session_state["_migration_currency"],
-                    )
-                    st.download_button(
-                        "Download verified local backup (JSON)",
-                        json.dumps(payload, indent=2).encode(),
-                        file_name="pennywise-local-backup.json",
-                        mime="application/json",
-                    )
-                    if st.button("Forget local export authorization"):
-                        for key in ("_migration_uid", "_migration_email", "_migration_currency"):
-                            st.session_state.pop(key, None)
-                        st.rerun()
-                else:
-                    with st.form("local-export-form"):
-                        migration_email = st.text_input("Old local email")
-                        migration_password = st.text_input("Old local password", type="password")
-                        export_ok = st.form_submit_button("Verify and prepare backup")
-                    if export_ok:
-                        with sqlite3.connect(DB_FILE) as conn:
-                            conn.row_factory = sqlite3.Row
-                            row = conn.execute(
-                                "SELECT id, email, currency, password_hash, salt FROM users "
-                                "WHERE lower(email) = lower(?)", (migration_email.strip(),),
-                            ).fetchone()
-                        if row and check_local_password(
-                            migration_password, row["password_hash"], row["salt"]
-                        ) is True:
-                            st.session_state["_migration_uid"] = str(row["id"])
-                            st.session_state["_migration_email"] = row["email"]
-                            st.session_state["_migration_currency"] = row["currency"]
-                            st.rerun()
-                        else:
-                            st.error("Local credentials could not be verified. Use a backup downloaded from the old app instead.")
 
 def main_app():
     inject_custom_css()
