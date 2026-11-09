@@ -12,10 +12,6 @@ def main():
         "0.0.0.0",
         "--server.headless",
         "true",
-        "--server.enableCORS",
-        "false",
-        "--server.enableXsrfProtection",
-        "false",
     ]
     subprocess.run(cmd)
 

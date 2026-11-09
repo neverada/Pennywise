@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "python3 run_app.py",
-    "build": "python3 -m py_compile app.py",
-    "lint": "python3 -m py_compile app.py",
+    "build": "python3 -m py_compile app.py supabase_store.py",
+    "lint": "python3 -m py_compile app.py supabase_store.py run_app.py",
+    "test:schema": "node tests/test_supabase_schema.mjs",
     "start": "python3 run_app.py"
   },
   "dependencies": {
@@ -17,6 +18,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.15",
     "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^22.0.0",
     "@types/papaparse": "^5.3.16",
