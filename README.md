@@ -1,33 +1,23 @@
-# Pennywise personal finance app
+# Pennywise Personal Finance
 
-A Streamlit personal finance dashboard inspired by the supplied Pennywise design. It supports Supabase email/password accounts, per-user records protected by Supabase Row Level Security, income and expense tracking, budgets, savings goals, charts, forecasts, CSV bank imports, CSV exports, PDF summaries, custom categories, and JSON backups.
+A Streamlit personal finance dashboard with custom styling, structured tabs, financial tracking, budgeting, savings goals, CSV imports, visual analytics, and full account management.
 
-Adding an initial amount to a new savings goal or recording a later contribution also creates a dated **Savings contribution** entry in the transaction history. These transfers remain visible and exportable, while staying out of spending and category totals. Editing or deleting a linked contribution also adjusts the goal balance.
+## Features
 
-## Run it
+- **Structured Layout**:
+  - **Overview**: Month selector, monthly spending hero card, 4 key metrics (Income, Expenses, Net Savings, Month-end forecast), overspending alerts, Plotly historical cash flow bar chart, category donut breakdown, category budget tracking progress bars, recent transactions, and dynamic "A money moment" insight.
+  - **Transactions**: Dedicated "Add income" and "Add expense" forms with custom category creation, date range filter, category filter, inline transaction editing, and deletion (with automatic savings-goal balance recalculation).
+  - **Budgets & Goals**: Department and total monthly budget limits, savings goal tracking with deadlines, and milestone contributions that generate ledger records.
+  - **Import & Export**: Bank statement CSV importer with automatic column detection and preview. Ledger exports as CSV and styled PDF summary reports (using ReportLab).
+  - **Settings & Account Management**: Display currency switcher (`Rs`, `$`, `€`, `£`, `₹`, `د.إ`), custom category adding and renaming, JSON backup download and restore, and **Permanent Account Deletion**.
+- **Permanent Account Deletion**:
+  - Dedicated "Danger Zone" in Settings.
+  - Secure confirmation to permanently wipe all transactions, budgets, goals, custom categories, and user profile data.
 
-1. Install Python 3.10 or newer.
-2. Create a Supabase project and run [`supabase_schema.sql`](./supabase_schema.sql) in the Supabase SQL Editor. This creates the app tables, Row Level Security policies, and the atomic account-backup restore function.
-3. Configure Streamlit secrets locally in `.streamlit/secrets.toml` or in the app's Streamlit Cloud settings:
+    
+ ## Requirements & Setup
 
-   ```toml
-   [supabase]
-   url = "https://YOUR_PROJECT_REF.supabase.co"
-   anon_key = "YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY"
-   ```
-
-   Use the project's public anon/publishable key, **never** its service-role key. Supabase Auth must have email/password enabled. If email confirmation is enabled, new users need to confirm their address before signing in.
-4. Install the packages: `python -m pip install -r requirements.txt`
-5. Start the app: `streamlit run app.py`, then create an account or sign in.
-
-The app does not create or manage the Supabase schema automatically; apply the SQL file before first use. All table operations use the signed-in Supabase client, and the database policies independently enforce ownership using `auth.uid()`.
-
-## Bank CSV format
-
-The importer accepts columns for date, amount, type, category, and description. It also recognizes common bank headers such as `transaction_date`, `details`, `debit`, `credit`, `withdrawal`, and `deposit`. Amounts below zero are treated as expenses. Review your bank's CSV before importing; imports create new transactions and are not deduplicated automatically.
-
-## Import existing local data
-
-Create a Supabase account with the same email address as the local Pennywise account, then sign in and open **Settings → Backup and restore**. Upload the existing `pennywise.db` SQLite file to import only records belonging to that matching email. Existing JSON backups can also be restored there. Restore replaces the signed-in account's transactions, budgets, goals, and custom categories; it maps old savings-goal IDs to their new database IDs. Password hashes are never imported: create a new Supabase Auth password, since local SQLite passwords cannot be transferred to Supabase Auth.
-
-The Settings page provides JSON backup download and restore. Supabase handles email confirmation and password storage. Keep backups secure, and use a trusted Supabase project; this app is a personal finance tracker, not a substitute for a professionally secured financial service.
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
