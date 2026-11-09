@@ -313,6 +313,12 @@ class CloudAppTests(unittest.TestCase):
         app.button(key="FormSubmitter:login_form-Sign in").click().run()
         self.assertFalse(app.exception)
 
+    def test_cloud_login_does_not_offer_local_account_export(self):
+        app = self.new_app()
+        labels = {widget.label for widget in app.text_input}
+        self.assertNotIn("Old local email", labels)
+        self.assertNotIn("Old local password", labels)
+
     def test_cloud_signup_income_persists_in_second_browser_without_sqlite_user(self):
         first = self.new_app()
         uid = self.signup(first)
@@ -437,37 +443,6 @@ class CloudAppTests(unittest.TestCase):
         self.assertFalse(any(self.service.rows.values()))
         with sqlite3.connect("pennywise.db") as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM users").fetchone()[0], 0)
-
-    def test_local_export_requires_verifiable_password_even_with_cloud_configured(self):
-        # The old local account is not silently converted into a Supabase user.
-        app = self.new_app()
-        salt = "00" * 16
-        digest = hashlib.pbkdf2_hmac("sha256", b"old-password", bytes.fromhex(salt), 1).hex()
-        with sqlite3.connect("pennywise.db") as conn:
-            uid = conn.execute(
-                "INSERT INTO users (email, password_hash, salt, currency, created_at) "
-                "VALUES (?, ?, ?, 'Rs', '2026-11-08')",
-                ("old@example.test", f"pbkdf2_sha256$1${digest}", salt),
-            ).lastrowid
-            conn.execute(
-                "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at) "
-                "VALUES (?, '2026-11-08', 100, 'Expense', 'Food', 'old data', '2026-11-08')", (str(uid),),
-            )
-        next(w for w in app.text_input if w.label == "Old local email").set_value("old@example.test")
-        next(w for w in app.text_input if w.label == "Old local password").set_value("wrong")
-        app.button(key="FormSubmitter:local-export-form-Verify and prepare backup").click().run()
-        self.assertIsNone(app.session_state.get("_migration_uid"))
-        next(w for w in app.text_input if w.label == "Old local password").set_value("old-password")
-        app.button(key="FormSubmitter:local-export-form-Verify and prepare backup").click().run()
-        self.assertFalse(app.exception)
-        self.assertEqual(app.session_state["_migration_uid"], str(uid))
-        self.assertFalse(self.service.users)  # Cloud account has NOT been created yet.
-        from app import local_backup_payload
-        backup = local_backup_payload(str(uid), "old@example.test", "Rs")
-        self.assertEqual(backup["transactions"][0]["note"], "old data")
-        self.assertNotIn("password_hash", json.dumps(backup))
-        with sqlite3.connect("pennywise.db") as conn:
-            self.assertEqual(conn.execute("SELECT count(*) FROM transactions").fetchone()[0], 1)
 
     def test_partial_configuration_blocks_local_signup_but_demo_stays_local(self):
         self.env.stop()
