@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import html
 import io
@@ -18,6 +20,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+
+from supabase_store import MAX_BACKUP_BYTES, RemoteStorageError, SupabaseStore, validate_backup
 
 st.set_page_config(
     page_title="Pennywise · Personal Finance",
@@ -166,161 +170,203 @@ def check_local_password(password: str, password_hash: str, salt: str) -> Option
     except (ValueError, TypeError):
         return False
 
-def has_supabase_configured() -> bool:
+def supabase_settings() -> Tuple[Optional[str], Optional[str], bool]:
+    """Return URL, anon/publishable key, and whether any cloud setting exists."""
     try:
         if "supabase" in st.secrets:
-            s = st.secrets["supabase"]
-            return bool(s.get("url") and s.get("anon_key"))
-        if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
-            return bool(st.secrets["SUPABASE_URL"] and st.secrets["SUPABASE_KEY"])
-        if os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"):
-            return True
-    except Exception:
-        pass
-    return False
+            config = st.secrets["supabase"]
+            return config.get("url"), config.get("anon_key"), True
+        if any(k in st.secrets for k in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_KEY")):
+            return (
+                st.secrets.get("SUPABASE_URL"),
+                st.secrets.get("SUPABASE_ANON_KEY") or st.secrets.get("SUPABASE_KEY"),
+                True,
+            )
+    except FileNotFoundError:
+        pass  # Local development without a secrets.toml file.
+    except Exception as exc:
+        raise RemoteStorageError("Supabase settings could not be read; local sign-in is disabled.") from exc
+    return (
+        os.environ.get("SUPABASE_URL"),
+        os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_KEY"),
+        any(k in os.environ for k in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_KEY")),
+    )
+
+
+def supabase_config_state() -> str:
+    url, key, present = supabase_settings()
+    if not present:
+        return "local"
+    if not url or not key:
+        return "incomplete"
+    return "cloud"
+
+
+def has_supabase_configured() -> bool:
+    return supabase_config_state() == "cloud"
+
 
 def get_supabase_client():
-    if not has_supabase_configured():
+    url, key, present = supabase_settings()
+    if not present:
         return None
+    if not url or not key:
+        raise RemoteStorageError("Supabase settings are incomplete; local accounts are disabled.")
+    # Reject a Supabase secret/service-role key: it bypasses row-level security.
+    if str(key).startswith("sb_secret_"):
+        raise RemoteStorageError("Use the Supabase publishable/anon key, never a secret key.")
+    if str(key).count(".") == 2:
+        try:
+            payload = str(key).split(".")[1]
+            role = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))).get("role")
+        except (ValueError, TypeError, AttributeError, binascii.Error):
+            role = None
+        if role == "service_role":
+            raise RemoteStorageError("Use the Supabase anon key, never a service-role key.")
     if "supabase_client" not in st.session_state:
         from supabase import create_client
-        url = None
-        key = None
-        if "supabase" in st.secrets:
-            url = st.secrets["supabase"]["url"]
-            key = st.secrets["supabase"]["anon_key"]
-        elif "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
-            url = st.secrets["SUPABASE_URL"]
-            key = st.secrets["SUPABASE_KEY"]
-        elif os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"):
-            url = os.environ.get("SUPABASE_URL")
-            key = os.environ.get("SUPABASE_KEY")
-        if url and key:
-            st.session_state.supabase_client = create_client(str(url), str(key))
-        else:
-            return None
-    return st.session_state.get("supabase_client")
+        st.session_state.supabase_client = create_client(str(url), str(key))
+    return st.session_state.supabase_client
 
 def is_supabase_mode() -> bool:
-    return get_supabase_client() is not None and not st.session_state.get("local_mode", False)
+    # Configuration alone must never switch a local/demo account to remote data.
+    return st.session_state.get("auth_mode") == "supabase"
+
+def remote_store(uid: str | None = None) -> SupabaseStore:
+    if not is_supabase_mode():
+        raise RuntimeError("A Supabase account must be signed in first")
+    client = get_supabase_client()
+    if client is None:
+        raise RemoteStorageError("Supabase is not configured. Sign in again after configuring it.")
+    return SupabaseStore(client, uid or signed_in_user_id())
 
 def signed_in_user_id() -> str:
-    return str(st.session_state.get("user_id", "1"))
+    return str(st.session_state["user_id"])
 
 def money(x: float | int, s: str) -> str:
     return f"{s} {round(float(x)):,}"
 
-def get_profile_currency(user_id: str, default_curr="Rs") -> str:
+def get_profile_currency(user_id: str, default_curr: str = "Rs") -> str:
     if is_supabase_mode():
-        client = get_supabase_client()
-        try:
-            res = client.table("profiles").select("currency").eq("id", user_id).execute().data
-            if res:
-                return res[0].get("currency", default_curr)
-            client.table("profiles").upsert({"id": user_id, "currency": default_curr}).execute()
-            return default_curr
-        except Exception:
-            pass
-    # Local SQLite
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT currency FROM users WHERE id = ?", (user_id,)).fetchone()
-    conn.close()
-    if row and row["currency"]:
-        return row["currency"]
-    return default_curr
+        return remote_store(user_id).currency(default_curr)
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute("SELECT currency FROM users WHERE id = ?", (user_id,)).fetchone()
+    return row[0] if row and row[0] else default_curr
 
-def update_profile_currency(user_id: str, new_curr: str):
+
+def update_profile_currency(user_id: str, new_curr: str) -> None:
     if is_supabase_mode():
-        client = get_supabase_client()
-        try:
-            client.table("profiles").update({"currency": new_curr}).eq("id", user_id).execute()
-        except Exception:
-            pass
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("UPDATE users SET currency = ? WHERE id = ?", (new_curr, user_id))
-    conn.commit()
-    conn.close()
+        remote_store(user_id).set_currency(new_curr)
+        return
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("UPDATE users SET currency = ? WHERE id = ?", (new_curr, user_id))
+
 
 def get_transactions_df(uid: str) -> pd.DataFrame:
     if is_supabase_mode():
-        client = get_supabase_client()
-        try:
-            rows = (
-                client.table("transactions")
-                .select("id,txn_date,amount,kind,category,note,goal_id")
-                .eq("user_id", uid)
-                .order("txn_date", desc=True)
-                .order("id", desc=True)
-                .execute()
-                .data
-            )
-            d = pd.DataFrame(rows).rename(columns={"txn_date": "date", "kind": "type", "note": "description"})
-            if not d.empty:
-                d["date"] = pd.to_datetime(d.date).dt.date
-                d["amount"] = pd.to_numeric(d.amount, errors="coerce").fillna(0)
-            return d
-        except Exception:
-            pass
-    # Local SQLite
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT id, txn_date as date, amount, kind as type, category, note as description, goal_id FROM transactions WHERE user_id = ? ORDER BY txn_date DESC, id DESC",
-        (uid,),
-    ).fetchall()
-    conn.close()
-    d = pd.DataFrame([dict(r) for r in rows])
+        rows = remote_store(uid).transactions()
+        d = pd.DataFrame(rows).rename(
+            columns={"txn_date": "date", "kind": "type", "note": "description"}
+        )
+    else:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, txn_date as date, amount, kind as type, category, note as description, "
+                "goal_id FROM transactions WHERE user_id = ? ORDER BY txn_date DESC, id DESC",
+                (uid,),
+            ).fetchall()
+        d = pd.DataFrame([dict(row) for row in rows])
     if not d.empty:
-        d["date"] = pd.to_datetime(d.date).dt.date
-        d["amount"] = pd.to_numeric(d.amount, errors="coerce").fillna(0)
+        d["date"] = pd.to_datetime(d["date"]).dt.date
+        d["amount"] = pd.to_numeric(d["amount"], errors="coerce").fillna(0)
+        d = d.sort_values(["date", "id"], ascending=False).reset_index(drop=True)
     return d
 
-def get_budgets_list(uid: str, month: str = None) -> List[Dict[str, Any]]:
+
+def get_budgets_list(uid: str, month: str | None = None) -> List[Dict[str, Any]]:
     if is_supabase_mode():
-        client = get_supabase_client()
-        try:
-            q = client.table("budgets").select("id,month,category,amount").eq("user_id", uid)
-            if month:
-                q = q.eq("month", month)
-            return q.order("month", desc=True).execute().data
-        except Exception:
-            pass
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    if month:
-        rows = conn.execute("SELECT id, month, category, amount FROM budgets WHERE user_id = ? AND month = ? ORDER BY month DESC", (uid, month)).fetchall()
-    else:
-        rows = conn.execute("SELECT id, month, category, amount FROM budgets WHERE user_id = ? ORDER BY month DESC", (uid,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+        return remote_store(uid).budgets(month)
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        if month:
+            rows = conn.execute(
+                "SELECT id, month, category, amount FROM budgets WHERE user_id = ? AND month = ? "
+                "ORDER BY month DESC", (uid, month),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, month, category, amount FROM budgets WHERE user_id = ? ORDER BY month DESC",
+                (uid,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
 
 def get_goals_list(uid: str) -> List[Dict[str, Any]]:
     if is_supabase_mode():
-        client = get_supabase_client()
-        try:
-            return client.table("goals").select("id,name,target,saved,due_date").eq("user_id", uid).execute().data
-        except Exception:
-            pass
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute("SELECT id, name, target, saved, due_date FROM goals WHERE user_id = ?", (uid,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+        return remote_store(uid).goals()
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, name, target, saved, due_date FROM goals WHERE user_id = ?", (uid,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
 
 def get_custom_categories(uid: str) -> List[str]:
     if is_supabase_mode():
-        client = get_supabase_client()
-        try:
-            rows = client.table("categories").select("name").eq("user_id", uid).execute().data
-            return sorted(r["name"] for r in rows)
-        except Exception:
-            pass
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute("SELECT name FROM categories WHERE user_id = ?", (uid,)).fetchall()
-    conn.close()
-    return sorted(r["name"] for r in rows)
+        return remote_store(uid).categories()
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute("SELECT name FROM categories WHERE user_id = ?", (uid,)).fetchall()
+    return sorted(row[0] for row in rows)
+
+
+def local_backup_payload(uid: str, email: str, currency: str) -> Dict[str, Any]:
+    """Export a verified local account without relying on the remote client."""
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = {
+            table: [dict(row) for row in conn.execute(
+                f"SELECT * FROM {table} WHERE user_id = ?", (uid,)
+            ).fetchall()]
+            for table in ("transactions", "budgets", "goals", "categories")
+        }
+    return {"users": [{"email": email, "currency": currency}], **rows}
+
+
+def restore_local_backup(uid: str, data: Dict[str, Any]) -> Optional[str]:
+    """Replace only this local account, in one rollback-safe SQLite transaction."""
+    payload, currency = validate_backup(data)
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for table in ("transactions", "budgets", "goals", "categories"):
+            conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
+        goal_map = {}
+        for g in payload["goals"]:
+            cursor = conn.execute(
+                "INSERT INTO goals (user_id, name, target, saved, due_date) VALUES (?, ?, ?, ?, ?)",
+                (uid, g["name"], g["target"], g["saved"], g["due_date"]),
+            )
+            if g["id"] is not None:
+                goal_map[g["id"]] = cursor.lastrowid
+        for t in payload["transactions"]:
+            conn.execute(
+                "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, "
+                "created_at, goal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, t["txn_date"], t["amount"], t["kind"], t["category"], t["note"],
+                 t["created_at"] or datetime.now(timezone.utc).isoformat(),
+                 goal_map.get(t["goal_id"])),
+            )
+        for b in payload["budgets"]:
+            conn.execute(
+                "INSERT INTO budgets (user_id, month, category, amount) VALUES (?, ?, ?, ?)",
+                (uid, b["month"], b["category"], b["amount"]),
+            )
+        for c in payload["categories"]:
+            conn.execute("INSERT INTO categories (user_id, name) VALUES (?, ?)", (uid, c["name"]))
+        if currency is not None:
+            conn.execute("UPDATE users SET currency = ? WHERE id = ?", (currency, uid))
+    return currency
 
 # ---------------------------------------------------------------------------
 # 100+ Transactions Generator (Spanning 3 Months: Aug, Sep, Oct 2026)
@@ -523,37 +569,25 @@ def seed_sample_data(uid: str, force_reset: bool = False):
 # Account Deletion Logic
 # ---------------------------------------------------------------------------
 
-def delete_user_account(uid: str, user_email: str) -> bool:
-    """Permanently deletes the user's transactions, budgets, goals, categories, and user profile."""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("DELETE FROM transactions WHERE user_id = ?", (uid,))
-        c.execute("DELETE FROM budgets WHERE user_id = ?", (uid,))
-        c.execute("DELETE FROM goals WHERE user_id = ?", (uid,))
-        c.execute("DELETE FROM categories WHERE user_id = ?", (uid,))
-        c.execute("DELETE FROM users WHERE id = ? OR lower(email) = lower(?)", (uid, user_email))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        st.error(f"Error deleting local account records: {e}")
-        return False
-
+def delete_user_account(uid: str) -> bool:
+    """Delete only the signed-in account, including Supabase Auth when remote."""
     if is_supabase_mode():
+        remote_store(uid).delete_account()
         try:
-            client = get_supabase_client()
-            client.table("transactions").delete().eq("user_id", uid).execute()
-            client.table("budgets").delete().eq("user_id", uid).execute()
-            client.table("goals").delete().eq("user_id", uid).execute()
-            client.table("categories").delete().eq("user_id", uid).execute()
-            client.table("profiles").delete().eq("id", uid).execute()
-            try:
-                client.auth.sign_out()
-            except Exception:
-                pass
+            get_supabase_client().auth.sign_out()
         except Exception:
-            pass
-
+            # The database deletion has already invalidated this account.
+            logging.exception("Supabase sign-out after account deletion failed")
+        return True
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            for table in ("transactions", "budgets", "goals", "categories"):
+                conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
+            conn.execute("DELETE FROM users WHERE id = ?", (uid,))
+    except sqlite3.Error:
+        logging.exception("Local account deletion failed")
+        st.error("Could not delete the local account. Please try again.")
+        return False
     return True
 
 # ---------------------------------------------------------------------------
@@ -861,27 +895,50 @@ def transaction_row_ui(r: pd.Series, symbol: str, show_actions: bool = True):
             st.rerun()
         if cols[4].button("🗑️", key=f"del-{int(r.id)}", help="Delete transaction"):
             uid = signed_in_user_id()
-            if pd.notna(r.get("goal_id")):
-                gid = int(r.goal_id)
-                conn = sqlite3.connect(DB_FILE)
-                conn.row_factory = sqlite3.Row
-                g = conn.execute("SELECT saved FROM goals WHERE id = ? AND user_id = ?", (gid, uid)).fetchone()
-                if g:
-                    new_saved = max(0.0, float(g["saved"]) - float(r.amount))
-                    conn.execute("UPDATE goals SET saved = ? WHERE id = ? AND user_id = ?", (new_saved, gid, uid))
-                conn.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?", (int(r.id), uid))
-                conn.commit()
-                conn.close()
+            if is_supabase_mode():
+                remote_store(uid).delete_transaction(int(r.id))
             else:
-                conn = sqlite3.connect(DB_FILE)
-                conn.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?", (int(r.id), uid))
-                conn.commit()
-                conn.close()
+                with sqlite3.connect(DB_FILE) as conn:
+                    if pd.notna(r.get("goal_id")) and r.category == "Savings contribution":
+                        gid = int(r.goal_id)
+                        g = conn.execute(
+                            "SELECT saved FROM goals WHERE id = ? AND user_id = ?", (gid, uid)
+                        ).fetchone()
+                        if g:
+                            conn.execute(
+                                "UPDATE goals SET saved = ? WHERE id = ? AND user_id = ?",
+                                (max(0.0, float(g[0]) - float(r.amount)), gid, uid),
+                            )
+                    conn.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?", (int(r.id), uid))
             st.toast("Transaction deleted.")
             st.rerun()
 
+def complete_supabase_login(client: Any, user: Any, default_currency: str = "Rs") -> None:
+    """Only an Auth session may become a signed-in remote account."""
+    uid = str(user.id)
+    metadata = getattr(user, "user_metadata", None) or {}
+    preferred = metadata.get("currency", default_currency)
+    if preferred not in CURRENCIES.values():
+        preferred = default_currency
+    currency = SupabaseStore(client, uid).currency(preferred)
+    st.session_state["auth_mode"] = "supabase"
+    st.session_state["user_id"] = uid
+    st.session_state["user_email"] = user.email or "User"
+    st.session_state["user_currency"] = currency
+    st.session_state["_currency_loaded_for"] = uid
+    for key in ("_migration_uid", "_migration_email", "_migration_currency"):
+        st.session_state.pop(key, None)
+    st.rerun()
+
+
 def auth_view():
     inject_custom_css()
+    try:
+        config_state = supabase_config_state()
+    except RemoteStorageError as exc:
+        st.error(str(exc))
+        config_state = "incomplete"
+    cloud_enabled = config_state == "cloud"
     left, right = st.columns([1, 1], gap="large")
     with left:
         st.markdown('<div class="brand"><span class="brand-mark">eco</span>Pennywise</div>', unsafe_allow_html=True)
@@ -897,43 +954,73 @@ def auth_view():
             """,
             unsafe_allow_html=True,
         )
-        st.caption("Includes 100+ transactions spanning three months in the instant demo workspace.")
+        st.caption("The instant demo is local sample data, not part of a Supabase account.")
+        if cloud_enabled:
+            st.info("With the Supabase schema installed, accounts sync across devices. Export old local data before redeploying.")
+        elif config_state == "incomplete":
+            st.error("Supabase settings are incomplete. Sign-in and account creation are disabled; only the local demo works.")
+        else:
+            st.warning("Local accounts are stored on this server only. Configure Supabase for durable accounts.")
     with right:
         st.markdown("### Welcome")
         login_tab, signup_tab = st.tabs(["Sign in", "Create account"])
         
         with login_tab:
             with st.form("login_form"):
-                email = st.text_input("Email address", value="demo@pennywise.app")
-                password = st.text_input("Password", type="password", value="password123!")
+                email = st.text_input("Email address")
+                password = st.text_input("Password", type="password")
                 go = st.form_submit_button("Sign in", type="primary", use_container_width=True)
             if go:
-                conn = sqlite3.connect(DB_FILE)
-                conn.row_factory = sqlite3.Row
-                try:
-                    user = conn.execute(
-                        "SELECT id, email, currency, password_hash, salt FROM users WHERE lower(email) = lower(?)",
-                        (email.strip(),),
-                    ).fetchone()
-                finally:
-                    conn.close()
-                if not user:
-                    st.error("Account not found. Create an account or start the instant demo.")
+                if config_state == "incomplete":
+                    st.error("Finish configuring Supabase before signing in.")
+                elif cloud_enabled:
+                    try:
+                        client = get_supabase_client()
+                        response = client.auth.sign_in_with_password({
+                            "email": email.strip(), "password": password,
+                        })
+                        if not response.user or not response.session:
+                            st.error("Sign-in could not complete. Check your email confirmation and password.")
+                        else:
+                            complete_supabase_login(client, response.user)
+                    except RemoteStorageError as exc:
+                        logging.exception("Supabase profile could not be loaded")
+                        st.error(str(exc))
+                    except Exception:
+                        logging.exception("Supabase sign-in failed")
+                        st.error("Could not sign in. Check your credentials, email confirmation and connection.")
                 else:
-                    verified = check_local_password(password, user["password_hash"], user["salt"])
-                    if verified is False:
-                        st.error("Incorrect email or password.")
+                    conn = sqlite3.connect(DB_FILE)
+                    conn.row_factory = sqlite3.Row
+                    try:
+                        user = conn.execute(
+                            "SELECT id, email, currency, password_hash, salt FROM users "
+                            "WHERE lower(email) = lower(?)", (email.strip(),),
+                        ).fetchone()
+                    finally:
+                        conn.close()
+                    if not user:
+                        st.error("Account not found. Create an account or start the instant demo.")
                     else:
-                        # Bundled/older accounts have hashes from an unknown format.
-                        # Keep them accessible but make the lack of verification visible.
-                        st.session_state["_legacy_login"] = verified is None
-                        st.session_state.user_id = str(user["id"])
-                        st.session_state.user_email = user["email"]
-                        st.session_state.user_currency = user["currency"]
-                        st.rerun()
-                
+                        verified = check_local_password(password, user["password_hash"], user["salt"])
+                        if verified is None:
+                            st.error(
+                                "This old local account's password format cannot be verified. "
+                                "Do not sign in with it; use a JSON backup downloaded from the old app "
+                                "or ask the deployment owner to help after proving ownership."
+                            )
+                        elif not verified:
+                            st.error("Incorrect email or password.")
+                        else:
+                            st.session_state["_legacy_login"] = False
+                            st.session_state["auth_mode"] = "local"
+                            st.session_state.user_id = str(user["id"])
+                            st.session_state.user_email = user["email"]
+                            st.session_state.user_currency = user["currency"]
+                            st.rerun()
+
             with st.expander("Explore the instant demo account", expanded=True):
-                st.caption("Try Pennywise with 100+ transactions spanning August, September, and October, monthly budgets, and savings goals.")
+                st.caption("Local shared sample only (not synced to Supabase). Starting the demo resets its sample records.")
                 if st.button("Start instant demo (100+ entries)", key="demo-btn", type="primary", use_container_width=True):
                     conn = sqlite3.connect(DB_FILE)
                     conn.row_factory = sqlite3.Row
@@ -948,6 +1035,7 @@ def auth_view():
                     st.session_state.user_id = demo_id
                     st.session_state.user_email = "demo@pennywise.app"
                     st.session_state.user_currency = "Rs"
+                    st.session_state["auth_mode"] = "demo"
                     st.session_state["_legacy_login"] = False
                     seed_sample_data(demo_id, force_reset=True)
                     st.rerun()
@@ -966,41 +1054,103 @@ def auth_view():
                     st.error("Password must be at least 8 characters.")
                 else:
                     curr_symbol = CURRENCIES[selected_curr]
-                    conn = sqlite3.connect(DB_FILE)
-                    uid = None
-                    try:
-                        existing = conn.execute(
-                            "SELECT id FROM users WHERE lower(email) = lower(?)", (email_clean,)
-                        ).fetchone()
-                        if existing:
-                            st.error("An account with this email already exists. Sign in instead.")
-                        else:
-                            uid = insert_local_user(conn, email_clean, curr_symbol, new_password)
-                    except sqlite3.IntegrityError:
-                        conn.rollback()
-                        logging.exception("Account creation failed due to a database constraint")
-                        st.error("Could not create this account. Check if the email is already in use.")
-                    except sqlite3.Error:
-                        conn.rollback()
-                        logging.exception("Account creation failed due to a database error")
-                        st.error("Could not create this account. Please check the app logs.")
-                    finally:
-                        conn.close()
-                    if uid is not None:
-                        st.session_state.user_id = uid
-                        st.session_state.user_email = email_clean
-                        st.session_state.user_currency = curr_symbol
-                        st.session_state["_legacy_login"] = False
-                        st.success("Account created successfully!")
+                    if config_state == "incomplete":
+                        st.error("Finish configuring Supabase before creating an account.")
+                    elif cloud_enabled:
+                        try:
+                            client = get_supabase_client()
+                            response = client.auth.sign_up({
+                                "email": email_clean, "password": new_password,
+                                "options": {"data": {"currency": curr_symbol}},
+                            })
+                            if response.user and response.session:
+                                complete_supabase_login(client, response.user, curr_symbol)
+                            else:
+                                st.info("Check your email for a confirmation link, then sign in. No data was moved from SQLite.")
+                        except RemoteStorageError as exc:
+                            logging.exception("Supabase profile could not be initialized")
+                            st.error(str(exc))
+                        except Exception:
+                            logging.exception("Supabase sign-up failed")
+                            st.error("Could not create a Supabase account. Check your connection and sign-up settings.")
+                    else:
+                        conn = sqlite3.connect(DB_FILE)
+                        uid = None
+                        try:
+                            existing = conn.execute(
+                                "SELECT id FROM users WHERE lower(email) = lower(?)", (email_clean,)
+                            ).fetchone()
+                            if existing:
+                                st.error("An account with this email already exists. Sign in instead.")
+                            else:
+                                uid = insert_local_user(conn, email_clean, curr_symbol, new_password)
+                        except sqlite3.IntegrityError:
+                            conn.rollback()
+                            logging.exception("Account creation failed due to a database constraint")
+                            st.error("Could not create this account. Check if the email is already in use.")
+                        except sqlite3.Error:
+                            conn.rollback()
+                            logging.exception("Account creation failed due to a database error")
+                            st.error("Could not create this account. Please check the app logs.")
+                        finally:
+                            conn.close()
+                        if uid is not None:
+                            st.session_state.user_id = uid
+                            st.session_state.user_email = email_clean
+                            st.session_state.user_currency = curr_symbol
+                            st.session_state["_legacy_login"] = False
+                            st.session_state["auth_mode"] = "local"
+                            st.success("Account created successfully!")
+                            st.rerun()
+
+        if cloud_enabled:
+            with st.expander("Export an old local account before migrating"):
+                st.caption(
+                    "Only accounts with a verifiable local password can be exported here. "
+                    "Download this before redeploying; server-local data may disappear on restart. "
+                    "After Supabase sign-in, restore the JSON under Settings."
+                )
+                migration_uid = st.session_state.get("_migration_uid")
+                if migration_uid:
+                    payload = local_backup_payload(
+                        migration_uid,
+                        st.session_state["_migration_email"],
+                        st.session_state["_migration_currency"],
+                    )
+                    st.download_button(
+                        "Download verified local backup (JSON)",
+                        json.dumps(payload, indent=2).encode(),
+                        file_name="pennywise-local-backup.json",
+                        mime="application/json",
+                    )
+                    if st.button("Forget local export authorization"):
+                        for key in ("_migration_uid", "_migration_email", "_migration_currency"):
+                            st.session_state.pop(key, None)
                         st.rerun()
+                else:
+                    with st.form("local-export-form"):
+                        migration_email = st.text_input("Old local email")
+                        migration_password = st.text_input("Old local password", type="password")
+                        export_ok = st.form_submit_button("Verify and prepare backup")
+                    if export_ok:
+                        with sqlite3.connect(DB_FILE) as conn:
+                            conn.row_factory = sqlite3.Row
+                            row = conn.execute(
+                                "SELECT id, email, currency, password_hash, salt FROM users "
+                                "WHERE lower(email) = lower(?)", (migration_email.strip(),),
+                            ).fetchone()
+                        if row and check_local_password(
+                            migration_password, row["password_hash"], row["salt"]
+                        ) is True:
+                            st.session_state["_migration_uid"] = str(row["id"])
+                            st.session_state["_migration_email"] = row["email"]
+                            st.session_state["_migration_currency"] = row["currency"]
+                            st.rerun()
+                        else:
+                            st.error("Local credentials could not be verified. Use a backup downloaded from the old app instead.")
 
 def main_app():
     inject_custom_css()
-    if st.session_state.get("_legacy_login"):
-        st.warning(
-            "This older account uses an unsupported password format, so its password was not verified. "
-            "Do not store sensitive data here; back up your records and migrate to a new account."
-        )
     uid = signed_in_user_id()
     user_email = st.session_state.get("user_email", "User")
     # A remote profile lookup on every widget interaction adds a network round-trip.
@@ -1035,9 +1185,18 @@ def main_app():
             st.session_state["main-nav-radio"] = "Settings"
             st.rerun()
         if signout_col.button("Sign out", key="top-signout"):
+            if is_supabase_mode():
+                try:
+                    get_supabase_client().auth.sign_out()
+                except Exception:
+                    logging.exception("Supabase sign-out failed")
             st.session_state.clear()
             st.rerun()
-            
+
+    st.caption(
+        "Supabase account · account data stored in Supabase (download a separate backup in Settings)"
+        if is_supabase_mode() else "Local-only demo/account · not synced or backed up by Supabase"
+    )
     st.markdown('<div class="topline"></div>', unsafe_allow_html=True)
     
     # Segmented navigation tabs
@@ -1383,16 +1542,21 @@ def main_app():
                 sub_inc = st.form_submit_button("Add income", type="primary", use_container_width=True)
             if sub_inc:
                 final_cat = new_cat_inc.strip() or cat_inc
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                if new_cat_inc.strip() and final_cat not in all_cats:
-                    c.execute("INSERT OR IGNORE INTO categories (user_id, name) VALUES (?, ?)", (uid, final_cat))
-                c.execute(
-                    "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (uid, dt_inc.isoformat(), amt_inc, "Income", final_cat, note_inc, datetime.now(timezone.utc).isoformat()),
-                )
-                conn.commit()
-                conn.close()
+                if is_supabase_mode():
+                    store = remote_store(uid)
+                    if new_cat_inc.strip() and final_cat not in all_cats:
+                        store.add_category(final_cat)
+                    store.add_transaction(dt_inc, amt_inc, "Income", final_cat, note_inc)
+                else:
+                    with sqlite3.connect(DB_FILE) as conn:
+                        if new_cat_inc.strip() and final_cat not in all_cats:
+                            conn.execute("INSERT OR IGNORE INTO categories (user_id, name) VALUES (?, ?)", (uid, final_cat))
+                        conn.execute(
+                            "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (uid, dt_inc.isoformat(), amt_inc, "Income", final_cat, note_inc,
+                             datetime.now(timezone.utc).isoformat()),
+                        )
                 st.success("Income saved.")
                 st.rerun()
 
@@ -1412,23 +1576,28 @@ def main_app():
                 final_cat = new_cat_exp.strip() or cat_exp
                 exp_month = dt_exp.strftime("%Y-%m")
                 
-                # Check if this expense exceeds budget
-                conn = sqlite3.connect(DB_FILE)
-                conn.row_factory = sqlite3.Row
-                c = conn.cursor()
-                if new_cat_exp.strip() and final_cat not in all_cats:
-                    c.execute("INSERT OR IGNORE INTO categories (user_id, name) VALUES (?, ?)", (uid, final_cat))
-                
-                # Check category budget
-                cat_b = c.execute("SELECT amount FROM budgets WHERE user_id = ? AND month = ? AND category = ?", (uid, exp_month, final_cat)).fetchone()
-                cur_cat_spent = c.execute("SELECT sum(amount) FROM transactions WHERE user_id = ? AND strftime('%Y-%m', txn_date) = ? AND category = ? AND kind = 'Expense'", (uid, exp_month, final_cat)).fetchone()[0] or 0.0
-                
-                c.execute(
-                    "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (uid, dt_exp.isoformat(), amt_exp, "Expense", final_cat, note_exp, datetime.now(timezone.utc).isoformat()),
+                # Read the budget and current ledger from this account's storage.
+                cat_b = next((b for b in get_budgets_list(uid, exp_month) if b["category"] == final_cat), None)
+                cur_cat_spent = sum(
+                    float(r.amount) for _, r in df.iterrows()
+                    if r.type == "Expense" and r.category == final_cat
+                    and r.date.strftime("%Y-%m") == exp_month
                 )
-                conn.commit()
-                conn.close()
+                if is_supabase_mode():
+                    store = remote_store(uid)
+                    if new_cat_exp.strip() and final_cat not in all_cats:
+                        store.add_category(final_cat)
+                    store.add_transaction(dt_exp, amt_exp, "Expense", final_cat, note_exp)
+                else:
+                    with sqlite3.connect(DB_FILE) as conn:
+                        if new_cat_exp.strip() and final_cat not in all_cats:
+                            conn.execute("INSERT OR IGNORE INTO categories (user_id, name) VALUES (?, ?)", (uid, final_cat))
+                        conn.execute(
+                            "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (uid, dt_exp.isoformat(), amt_exp, "Expense", final_cat, note_exp,
+                             datetime.now(timezone.utc).isoformat()),
+                        )
 
                 if cat_b and (cur_cat_spent + amt_exp) > float(cat_b["amount"]):
                     st.warning(f"⚠️ Budget Alert: This entry brings your '{final_cat}' spending to {money(cur_cat_spent + amt_exp, symbol)}, exceeding your set budget of {money(cat_b['amount'], symbol)}!")
@@ -1472,20 +1641,29 @@ def main_app():
                         new_note = st.text_input("Description", value=r_curr.description or "")
                         btn_save = st.form_submit_button("Save changes", type="primary")
                     if btn_save:
-                        conn = sqlite3.connect(DB_FILE)
-                        if pd.notna(r_curr.get("goal_id")) and r_curr.category == "Savings contribution":
-                            gid = int(r_curr.goal_id)
-                            conn.row_factory = sqlite3.Row
-                            g = conn.execute("SELECT saved FROM goals WHERE id = ? AND user_id = ?", (gid, uid)).fetchone()
-                            if g:
-                                delta = (new_amt - r_curr.amount) if new_cat == "Savings contribution" else -r_curr.amount
-                                conn.execute("UPDATE goals SET saved = ? WHERE id = ? AND user_id = ?", (max(0.0, float(g["saved"]) + delta), gid, uid))
-                        conn.execute(
-                            "UPDATE transactions SET txn_date = ?, amount = ?, kind = ?, category = ?, note = ? WHERE id = ? AND user_id = ?",
-                            (new_dt.isoformat(), new_amt, new_kind, new_cat, new_note, edit_id, uid),
-                        )
-                        conn.commit()
-                        conn.close()
+                        if is_supabase_mode():
+                            remote_store(uid).edit_transaction(edit_id, new_dt, new_amt, new_kind, new_cat, new_note)
+                        else:
+                            with sqlite3.connect(DB_FILE) as conn:
+                                keep_goal = new_kind == "Expense" and new_cat == "Savings contribution"
+                                if pd.notna(r_curr.get("goal_id")) and r_curr.category == "Savings contribution":
+                                    gid = int(r_curr.goal_id)
+                                    g = conn.execute(
+                                        "SELECT saved FROM goals WHERE id = ? AND user_id = ?", (gid, uid)
+                                    ).fetchone()
+                                    if g:
+                                        delta = (new_amt if keep_goal else 0) - float(r_curr.amount)
+                                        conn.execute(
+                                            "UPDATE goals SET saved = ? WHERE id = ? AND user_id = ?",
+                                            (max(0.0, float(g[0]) + delta), gid, uid),
+                                        )
+                                conn.execute(
+                                    "UPDATE transactions SET txn_date = ?, amount = ?, kind = ?, category = ?, "
+                                    "note = ?, goal_id = ? WHERE id = ? AND user_id = ?",
+                                    (new_dt.isoformat(), new_amt, new_kind, new_cat, new_note,
+                                     int(r_curr.goal_id) if keep_goal and pd.notna(r_curr.get("goal_id")) else None,
+                                     edit_id, uid),
+                                )
                         st.session_state.edit_transaction_id = None
                         st.toast("Changes saved.")
                         st.rerun()
@@ -1532,13 +1710,14 @@ def main_app():
                 b_lim = st.number_input(f"Monthly limit ({symbol})", min_value=0.0, step=1000.0)
                 save_b = st.form_submit_button("Save budget", type="primary")
             if save_b:
-                conn = sqlite3.connect(DB_FILE)
-                conn.execute(
-                    "INSERT OR REPLACE INTO budgets (user_id, month, category, amount) VALUES (?, ?, ?, ?)",
-                    (uid, b_ym, b_cat, b_lim),
-                )
-                conn.commit()
-                conn.close()
+                if is_supabase_mode():
+                    remote_store(uid).save_budget(b_ym, b_cat, b_lim)
+                else:
+                    with sqlite3.connect(DB_FILE) as conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO budgets (user_id, month, category, amount) VALUES (?, ?, ?, ?)",
+                            (uid, b_ym, b_cat, b_lim),
+                        )
                 st.success("Budget saved.")
                 st.rerun()
                 
@@ -1551,10 +1730,11 @@ def main_app():
                     c1, c2 = st.columns([3, 1])
                     c1.write(f"**{b['month']}** · {b['category']} · {money(b['amount'], symbol)}")
                     if c2.button("Delete", key=f"del-bdg-{b['id']}"):
-                        conn = sqlite3.connect(DB_FILE)
-                        conn.execute("DELETE FROM budgets WHERE id = ? AND user_id = ?", (b["id"], uid))
-                        conn.commit()
-                        conn.close()
+                        if is_supabase_mode():
+                            remote_store(uid).delete_budget(b["id"])
+                        else:
+                            with sqlite3.connect(DB_FILE) as conn:
+                                conn.execute("DELETE FROM budgets WHERE id = ? AND user_id = ?", (b["id"], uid))
                         st.rerun()
 
         with col_g:
@@ -1566,20 +1746,24 @@ def main_app():
                 g_due = st.date_input("Target date", value=today + timedelta(days=90))
                 save_g = st.form_submit_button("Create savings goal", type="primary")
             if save_g and g_name.strip():
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute(
-                    "INSERT INTO goals (user_id, name, target, saved, due_date) VALUES (?, ?, ?, ?, ?)",
-                    (uid, g_name.strip(), g_target, g_initial, g_due.isoformat()),
-                )
-                new_gid = c.lastrowid
-                if g_initial > 0:
-                    c.execute(
-                        "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at, goal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (uid, today.isoformat(), g_initial, "Expense", "Savings contribution", f"Initial contribution · {g_name.strip()}", datetime.now(timezone.utc).isoformat(), new_gid),
-                    )
-                conn.commit()
-                conn.close()
+                if is_supabase_mode():
+                    remote_store(uid).create_goal(g_name.strip(), g_target, g_initial, g_due, today)
+                else:
+                    with sqlite3.connect(DB_FILE) as conn:
+                        c = conn.cursor()
+                        c.execute(
+                            "INSERT INTO goals (user_id, name, target, saved, due_date) VALUES (?, ?, ?, ?, ?)",
+                            (uid, g_name.strip(), g_target, g_initial, g_due.isoformat()),
+                        )
+                        new_gid = c.lastrowid
+                        if g_initial > 0:
+                            c.execute(
+                                "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, "
+                                "created_at, goal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                (uid, today.isoformat(), g_initial, "Expense", "Savings contribution",
+                                 f"Initial contribution · {g_name.strip()}",
+                                 datetime.now(timezone.utc).isoformat(), new_gid),
+                            )
                 st.success("Savings goal created.")
                 st.rerun()
                 
@@ -1597,23 +1781,30 @@ def main_app():
                         add_dt = ca2.date_input("Date", value=today, key=f"ca-dt-{g['id']}")
                         add_ok = ca3.form_submit_button("Contribute")
                     if add_ok and add_amt > 0:
-                        conn = sqlite3.connect(DB_FILE)
-                        c = conn.cursor()
-                        new_total = float(g["saved"]) + add_amt
-                        c.execute("UPDATE goals SET saved = ? WHERE id = ? AND user_id = ?", (new_total, g["id"], uid))
-                        c.execute(
-                            "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at, goal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                            (uid, add_dt.isoformat(), add_amt, "Expense", "Savings contribution", f"Contribution · {g['name']}", datetime.now(timezone.utc).isoformat(), g["id"]),
-                        )
-                        conn.commit()
-                        conn.close()
+                        if is_supabase_mode():
+                            remote_store(uid).contribute_goal(g["id"], add_amt, add_dt)
+                        else:
+                            with sqlite3.connect(DB_FILE) as conn:
+                                c = conn.cursor()
+                                c.execute(
+                                    "UPDATE goals SET saved = saved + ? WHERE id = ? AND user_id = ?",
+                                    (add_amt, g["id"], uid),
+                                )
+                                c.execute(
+                                    "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, "
+                                    "created_at, goal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                    (uid, add_dt.isoformat(), add_amt, "Expense", "Savings contribution",
+                                     f"Contribution · {g['name']}",
+                                     datetime.now(timezone.utc).isoformat(), g["id"]),
+                                )
                         st.success("Contribution added!")
                         st.rerun()
                     if st.button("Delete goal", key=f"del-goal-{g['id']}"):
-                        conn = sqlite3.connect(DB_FILE)
-                        conn.execute("DELETE FROM goals WHERE id = ? AND user_id = ?", (g["id"], uid))
-                        conn.commit()
-                        conn.close()
+                        if is_supabase_mode():
+                            remote_store(uid).delete_goal(g["id"])
+                        else:
+                            with sqlite3.connect(DB_FILE) as conn:
+                                conn.execute("DELETE FROM goals WHERE id = ? AND user_id = ?", (g["id"], uid))
                         st.rerun()
 
     # -----------------------------------------------------------------------
@@ -1650,7 +1841,7 @@ def main_app():
                                 cred = float(row[credit_col]) if (credit_col and pd.notna(row[credit_col])) else 0.0
                                 kind_val = "Expense" if deb > 0 else "Income"
                                 val = deb if deb > 0 else cred
-                            if val > 0:
+                            if math.isfinite(val) and val > 0:
                                 cat_val = str(row[cat_col]) if (cat_col and pd.notna(row[cat_col])) else "Other"
                                 note_val = str(row[desc_col]) if (desc_col and pd.notna(row[desc_col])) else "Imported from CSV"
                                 valid_entries.append((d_val.isoformat(), val, kind_val if kind_val in ["Income", "Expense"] else "Expense", cat_val, note_val))
@@ -1658,19 +1849,23 @@ def main_app():
                             pass
                     st.write(f"Preview: **{len(valid_entries)}** valid rows detected out of {len(raw_df)} total rows.")
                     if valid_entries and st.button("Confirm and import transactions", type="primary"):
-                        conn = sqlite3.connect(DB_FILE)
-                        now_str = datetime.now(timezone.utc).isoformat()
-                        for v_date, v_amt, v_kind, v_cat, v_note in valid_entries:
-                            conn.execute(
-                                "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (uid, v_date, v_amt, v_kind, v_cat, v_note, now_str),
-                            )
-                        conn.commit()
-                        conn.close()
+                        if is_supabase_mode():
+                            remote_store(uid).import_transactions(valid_entries)
+                        else:
+                            now_str = datetime.now(timezone.utc).isoformat()
+                            with sqlite3.connect(DB_FILE) as conn:
+                                conn.executemany(
+                                    "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, "
+                                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                    [(uid, v_date, v_amt, v_kind, v_cat, v_note, now_str)
+                                     for v_date, v_amt, v_kind, v_cat, v_note in valid_entries],
+                                )
                         st.success(f"Successfully imported {len(valid_entries)} transactions!")
                         st.rerun()
                 else:
                     st.error("The CSV must include a date column and an amount, debit, or credit column.")
+            except RemoteStorageError:
+                raise
             except Exception as e:
                 st.error(f"Could not parse CSV: {e}")
                 
@@ -1772,10 +1967,11 @@ def main_app():
             if c_name.strip() in all_cats:
                 st.error("That category already exists.")
             else:
-                conn = sqlite3.connect(DB_FILE)
-                conn.execute("INSERT INTO categories (user_id, name) VALUES (?, ?)", (uid, c_name.strip()))
-                conn.commit()
-                conn.close()
+                if is_supabase_mode():
+                    remote_store(uid).add_category(c_name.strip())
+                else:
+                    with sqlite3.connect(DB_FILE) as conn:
+                        conn.execute("INSERT INTO categories (user_id, name) VALUES (?, ?)", (uid, c_name.strip()))
                 st.success("Category added.")
                 st.rerun()
                 
@@ -1792,33 +1988,37 @@ def main_app():
                 elif target_new != old_c and target_new in all_cats:
                     st.error("A category with that name already exists.")
                 elif target_new != old_c:
-                    conn = sqlite3.connect(DB_FILE)
-                    conn.execute("UPDATE transactions SET category = ? WHERE user_id = ? AND category = ?", (target_new, uid, old_c))
-                    conn.execute("UPDATE budgets SET category = ? WHERE user_id = ? AND category = ?", (target_new, uid, old_c))
-                    conn.execute("UPDATE categories SET name = ? WHERE user_id = ? AND name = ?", (target_new, uid, old_c))
-                    conn.commit()
-                    conn.close()
+                    if is_supabase_mode():
+                        remote_store(uid).rename_category(old_c, target_new)
+                    else:
+                        with sqlite3.connect(DB_FILE) as conn:
+                            conn.execute(
+                                "UPDATE transactions SET category = ? WHERE user_id = ? AND category = ?",
+                                (target_new, uid, old_c),
+                            )
+                            conn.execute(
+                                "UPDATE budgets SET category = ? WHERE user_id = ? AND category = ?",
+                                (target_new, uid, old_c),
+                            )
+                            conn.execute(
+                                "UPDATE categories SET name = ? WHERE user_id = ? AND name = ?",
+                                (target_new, uid, old_c),
+                            )
                     st.success(f"Renamed '{old_c}' to '{target_new}'.")
                     st.rerun()
 
         st.markdown("---")
         # Backup and restore
         st.markdown("### Backup and restore")
-        conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row
-        tx_rows = [dict(r) for r in conn.execute("SELECT * FROM transactions WHERE user_id = ?", (uid,)).fetchall()]
-        bdg_rows = [dict(r) for r in conn.execute("SELECT * FROM budgets WHERE user_id = ?", (uid,)).fetchall()]
-        goal_rows = [dict(r) for r in conn.execute("SELECT * FROM goals WHERE user_id = ?", (uid,)).fetchall()]
-        cat_rows = [dict(r) for r in conn.execute("SELECT * FROM categories WHERE user_id = ?", (uid,)).fetchall()]
-        conn.close()
-        
-        backup_payload = {
-            "users": [{"email": user_email, "currency": symbol}],
-            "transactions": tx_rows,
-            "budgets": bdg_rows,
-            "goals": goal_rows,
-            "categories": cat_rows,
-        }
+        st.caption(
+            "Download a private JSON backup before migrating or restoring. A restore replaces "
+            "this account's transactions, budgets, goals, and categories; it never changes "
+            "your Supabase sign-in identity or password."
+        )
+        backup_payload = (
+            remote_store(uid).backup(user_email, symbol) if is_supabase_mode()
+            else local_backup_payload(uid, user_email, symbol)
+        )
         st.download_button(
             "Download account backup (JSON)",
             json.dumps(backup_payload, indent=2).encode(),
@@ -1826,39 +2026,47 @@ def main_app():
             mime="application/json",
             type="primary",
         )
-        
+
         uploaded_backup = st.file_uploader("Restore backup (JSON)", type=["json"], key="backup-restore-file")
-        if uploaded_backup and st.button("Restore backup now"):
-            try:
-                data = json.loads(uploaded_backup.getvalue())
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute("DELETE FROM transactions WHERE user_id = ?", (uid,))
-                c.execute("DELETE FROM budgets WHERE user_id = ?", (uid,))
-                c.execute("DELETE FROM goals WHERE user_id = ?", (uid,))
-                c.execute("DELETE FROM categories WHERE user_id = ?", (uid,))
-                
-                goal_map = {}
-                for g in data.get("goals", []):
-                    c.execute("INSERT INTO goals (user_id, name, target, saved, due_date) VALUES (?, ?, ?, ?, ?)", (uid, g["name"], g["target"], g.get("saved", 0), g.get("due_date", "")))
-                    if "id" in g:
-                        goal_map[g["id"]] = c.lastrowid
-                for t in data.get("transactions", []):
-                    mapped_gid = goal_map.get(t.get("goal_id")) if t.get("goal_id") else None
-                    c.execute(
-                        "INSERT INTO transactions (user_id, txn_date, amount, kind, category, note, created_at, goal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (uid, t["txn_date"], t["amount"], t["kind"], t["category"], t.get("note", ""), t.get("created_at", datetime.now(timezone.utc).isoformat()), mapped_gid),
+        if uploaded_backup:
+            if uploaded_backup.size > MAX_BACKUP_BYTES:
+                st.error("Backup is too large (20 MB maximum). No data was changed.")
+            else:
+                try:
+                    data = json.loads(uploaded_backup.getvalue())
+                    preview, _ = validate_backup(data)
+                except (ValueError, TypeError) as exc:
+                    st.error(f"Invalid backup: {exc}. No data was changed.")
+                else:
+                    st.info(
+                        "Ready to import: " + ", ".join(
+                            f"{len(preview[table])} {table}" for table in
+                            ("transactions", "budgets", "goals", "categories")
+                        ) + ". Source user IDs and passwords will be ignored."
                     )
-                for b in data.get("budgets", []):
-                    c.execute("INSERT OR REPLACE INTO budgets (user_id, month, category, amount) VALUES (?, ?, ?, ?)", (uid, b["month"], b.get("category", "All spending"), b["amount"]))
-                for cat in data.get("categories", []):
-                    c.execute("INSERT OR IGNORE INTO categories (user_id, name) VALUES (?, ?)", (uid, cat["name"]))
-                conn.commit()
-                conn.close()
-                st.success("Backup restored successfully!")
-                st.rerun()
-            except Exception as ex:
-                st.error(f"Failed to restore backup: {ex}")
+                    if not any(preview.values()):
+                        st.warning("This backup is empty; restoring it will erase all current records.")
+                    confirm_restore = st.checkbox(
+                        "I downloaded my current backup and understand that restoring replaces all account records.",
+                        key="confirm-backup-replace",
+                    )
+                    if st.button("Replace account records from JSON", disabled=not confirm_restore):
+                        try:
+                            if is_supabase_mode():
+                                restored_currency = remote_store(uid).restore_backup(data)
+                            else:
+                                restored_currency = restore_local_backup(uid, data)
+                        except RemoteStorageError as exc:
+                            logging.exception("Supabase backup restore failed")
+                            st.error(f"Restore failed; Supabase rolled back changes. {exc}")
+                        except (sqlite3.Error, ValueError) as exc:
+                            logging.exception("Local backup restore failed")
+                            st.error(f"Restore failed; no account data was changed. {exc}")
+                        else:
+                            if restored_currency is not None:
+                                st.session_state.user_currency = restored_currency
+                            st.success("Backup restored successfully. Keep your private copy until you verify every record.")
+                            st.rerun()
 
         # -------------------------------------------------------------------
         # DANGER ZONE: DELETE ACCOUNT
@@ -1891,17 +2099,60 @@ def main_app():
             
             if confirm_check:
                 if st.button("Delete my account permanently", type="primary", key="btn-delete-account"):
-                    success = delete_user_account(uid, user_email)
+                    success = delete_user_account(uid)
                     if success:
                         st.session_state.clear()
                         st.success("Your account and all records have been deleted.")
                         st.rerun()
 
 def main():
+    try:
+        config_state = supabase_config_state()
+    except RemoteStorageError as exc:
+        st.error(str(exc))
+        return
     if "user_id" not in st.session_state:
         auth_view()
-    else:
+        return
+    if st.session_state.get("_legacy_login"):
+        # Do not retain access from a previous deployment which accepted
+        # unverified legacy hashes. Such sessions cannot safely export data.
+        st.session_state.clear()
+        st.error("Unverifiable legacy local sessions have been signed out. Use a previously downloaded backup.")
+        auth_view()
+        return
+    if config_state in ("cloud", "incomplete") and st.session_state.get("auth_mode") not in ("supabase", "demo"):
+        # Existing local sessions must not silently keep writing SQLite.
+        st.session_state.clear()
+        st.warning("Sign in to your Supabase account. Export old local data before switching.")
+        auth_view()
+        return
+    if is_supabase_mode():
+        if config_state != "cloud":
+            st.error("Supabase is not configured. Your cloud account remains signed out; no data was written locally.")
+            return
+        try:
+            client = get_supabase_client()
+            session = client.auth.get_session()
+            if not session or not session.user:
+                st.session_state.clear()
+                st.warning("Your Supabase session expired. Please sign in again.")
+                auth_view()
+                return
+            if str(session.user.id) != signed_in_user_id():
+                st.session_state.clear()
+                st.error("Supabase session changed. Please sign in again.")
+                auth_view()
+                return
+        except Exception:
+            logging.exception("Could not validate Supabase session")
+            st.error("Unable to validate your Supabase session. Check your connection and try again.")
+            return
+    try:
         main_app()
+    except RemoteStorageError as exc:
+        logging.exception("Supabase storage error")
+        st.error(str(exc))
 
 if __name__ == "__main__":
     main()

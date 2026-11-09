@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# npm dependencies for the optional PostgreSQL schema test
+/node_modules/

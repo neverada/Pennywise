@@ -109,12 +109,15 @@ class AccountTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT count(*) FROM transactions WHERE user_id = ?", (uid,)).fetchone()[0], 116)
             self.assertTrue(conn.execute("SELECT password_hash FROM users WHERE id = ?", (uid,)).fetchone()[0])
 
-    def test_legacy_login_shows_warning(self):
+    def test_unverifiable_legacy_password_cannot_expose_account_backup(self):
         app = self.open_app(bundled=True)
         self.login(app, "demo@pennywise.app", "legacy-password-not-verified")
-        self.assertEqual(app.session_state["user_id"], "1")
-        self.assertTrue(app.session_state["_legacy_login"])
-        self.assertTrue(any("unsupported password format" in w.value for w in app.warning))
+        self.assertIsNone(app.session_state.get("user_id"))
+        self.assertTrue(any("cannot be verified" in e.value for e in app.error))
+        # The explicit, clearly labelled shared demo remains available.
+        app.button(key="demo-btn").click().run()
+        self.assertEqual(app.session_state["auth_mode"], "demo")
+        self.assertFalse(app.exception)
 
 
 if __name__ == "__main__":

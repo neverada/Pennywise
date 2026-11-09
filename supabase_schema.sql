@@ -98,16 +98,24 @@ grant usage, select on sequence
     public.transactions_id_seq, public.budgets_id_seq, public.goals_id_seq, public.categories_id_seq
     to authenticated;
 
+-- All user data is RLS-protected. Run this whole file in the Supabase SQL editor
+-- before enabling the Streamlit anon/publishable key. Re-running is safe for
+-- existing account rows (the backup RPC replaces rows only when a user calls it).
+-- The four-argument RPC was used in earlier versions; remove it to avoid
+-- PostgREST ambiguity with the optional currency parameter below.
+drop function if exists public.restore_account_backup(jsonb, jsonb, jsonb, jsonb);
+
 create or replace function public.restore_account_backup(
     p_transactions jsonb,
     p_budgets jsonb,
     p_goals jsonb,
-    p_categories jsonb
+    p_categories jsonb,
+    p_currency text default null
 )
 returns void
 language plpgsql
 security invoker
-set search_path = public, pg_temp
+set search_path = ''
 as $$
 declare
     current_user_id uuid := auth.uid();
@@ -120,145 +128,280 @@ begin
     if current_user_id is null then
         raise exception 'Authentication required';
     end if;
+    if jsonb_typeof(p_transactions) is distinct from 'array'
+       or jsonb_typeof(p_budgets) is distinct from 'array'
+       or jsonb_typeof(p_goals) is distinct from 'array'
+       or jsonb_typeof(p_categories) is distinct from 'array' then
+        raise exception 'All backup datasets must be JSON arrays';
+    end if;
+    if jsonb_array_length(p_transactions) > 20000 or jsonb_array_length(p_budgets) > 20000
+       or jsonb_array_length(p_goals) > 20000 or jsonb_array_length(p_categories) > 20000 then
+        raise exception 'Backup contains too many records';
+    end if;
+    if p_currency is not null and p_currency not in ('Rs', '$', '€', '£', '₹', 'د.إ') then
+        raise exception 'Unsupported currency';
+    end if;
 
+    -- A single PostgREST RPC executes within a single PostgreSQL transaction.
+    -- If any INSERT or constraint fails, the earlier DELETEs are rolled back.
     delete from public.transactions where user_id = current_user_id;
     delete from public.budgets where user_id = current_user_id;
     delete from public.goals where user_id = current_user_id;
     delete from public.categories where user_id = current_user_id;
 
-    for item in select value from jsonb_array_elements(coalesce(p_goals, '[]'::jsonb))
+    for item in select value from jsonb_array_elements(p_goals)
     loop
         insert into public.goals (user_id, name, target, saved, due_date)
         values (
-            current_user_id,
-            item->>'name',
-            (item->>'target')::numeric,
-            coalesce((item->>'saved')::numeric, 0),
-            coalesce(item->>'due_date', '')
-        )
-        returning id into new_goal_id;
-
+            current_user_id, item->>'name', (item->>'target')::numeric,
+            coalesce((item->>'saved')::numeric, 0), coalesce(item->>'due_date', '')
+        ) returning id into new_goal_id;
         old_goal_id := item->>'id';
         if old_goal_id is not null then
+            if goal_id_map ? old_goal_id then
+                raise exception 'Duplicate goal ID in backup';
+            end if;
             goal_id_map := jsonb_set(goal_id_map, array[old_goal_id], to_jsonb(new_goal_id::text), true);
         end if;
     end loop;
 
-    for item in select value from jsonb_array_elements(coalesce(p_transactions, '[]'::jsonb))
+    for item in select value from jsonb_array_elements(p_transactions)
     loop
         mapped_goal_id := null;
         old_goal_id := item->>'goal_id';
         if old_goal_id is not null then
-            mapped_goal_id := nullif(goal_id_map->>old_goal_id, '')::bigint;
+            if not (goal_id_map ? old_goal_id) then
+                raise exception 'Transaction refers to a missing goal in backup';
+            end if;
+            mapped_goal_id := (goal_id_map->>old_goal_id)::bigint;
         end if;
-
         insert into public.transactions
             (user_id, txn_date, amount, kind, category, note, created_at, goal_id)
         values (
-            current_user_id,
-            (item->>'txn_date')::date,
-            (item->>'amount')::numeric,
-            item->>'kind',
-            item->>'category',
-            coalesce(item->>'note', ''),
-            coalesce(nullif(item->>'created_at', '')::timestamptz, now()),
-            mapped_goal_id
+            current_user_id, (item->>'txn_date')::date, (item->>'amount')::numeric,
+            item->>'kind', item->>'category', coalesce(item->>'note', ''),
+            coalesce(nullif(item->>'created_at', '')::timestamptz, now()), mapped_goal_id
         );
     end loop;
-
-    for item in select value from jsonb_array_elements(coalesce(p_budgets, '[]'::jsonb))
+    for item in select value from jsonb_array_elements(p_budgets)
     loop
         insert into public.budgets (user_id, month, category, amount)
         values (
-            current_user_id,
-            item->>'month',
-            coalesce(item->>'category', 'All spending'),
+            current_user_id, item->>'month', coalesce(item->>'category', 'All spending'),
             (item->>'amount')::numeric
         );
     end loop;
-
-    for item in select value from jsonb_array_elements(coalesce(p_categories, '[]'::jsonb))
+    for item in select value from jsonb_array_elements(p_categories)
     loop
         insert into public.categories (user_id, name)
         values (current_user_id, item->>'name');
     end loop;
+    if p_currency is not null then
+        insert into public.profiles (id, currency)
+        values (current_user_id, p_currency)
+        on conflict (id) do update set currency = excluded.currency;
+    end if;
 end;
 $$;
 
-revoke all on function public.restore_account_backup(jsonb, jsonb, jsonb, jsonb) from public, anon;
-grant execute on function public.restore_account_backup(jsonb, jsonb, jsonb, jsonb) to authenticated;
+revoke all on function public.restore_account_backup(jsonb, jsonb, jsonb, jsonb, text) from public, anon;
+grant execute on function public.restore_account_backup(jsonb, jsonb, jsonb, jsonb, text) to authenticated;
 
-create or replace function public.seed_demo_data()
+create or replace function public.create_user_goal(
+    p_name text, p_target numeric, p_saved numeric, p_due_date date, p_today date
+)
 returns void
 language plpgsql
 security invoker
-set search_path = public, pg_temp
+set search_path = ''
 as $$
 declare
     current_user_id uuid := auth.uid();
-    trip_goal_id bigint;
+    new_goal_id bigint;
 begin
-    if current_user_id is null then
-        raise exception 'Authentication required';
+    if current_user_id is null then raise exception 'Authentication required'; end if;
+    if nullif(trim(p_name), '') is null or p_target <= 0 or p_saved < 0 then
+        raise exception 'Invalid savings goal';
     end if;
-
-    if exists (select 1 from public.transactions where user_id = current_user_id)
-       or exists (select 1 from public.budgets where user_id = current_user_id)
-       or exists (select 1 from public.goals where user_id = current_user_id)
-       or exists (select 1 from public.categories where user_id = current_user_id) then
-        return;
-    end if;
-
-    insert into public.profiles (id, currency)
-    values (current_user_id, 'Rs')
-    on conflict (id) do nothing;
-
-    insert into public.categories (user_id, name)
-    values (current_user_id, 'Books'), (current_user_id, 'Travel')
-    on conflict (user_id, name) do nothing;
-
-    insert into public.budgets (user_id, month, category, amount)
-    values
-        (current_user_id, to_char(current_date, 'YYYY-MM'), 'All spending', 80000),
-        (current_user_id, to_char(current_date, 'YYYY-MM'), 'Food', 20000),
-        (current_user_id, to_char(current_date, 'YYYY-MM'), 'Transport', 10000)
-    on conflict (user_id, month, category) do nothing;
-
     insert into public.goals (user_id, name, target, saved, due_date)
-    values (
-        current_user_id,
-        'Weekend getaway',
-        100000,
-        30000,
-        (current_date + interval '120 days')::date::text
-    )
-    returning id into trip_goal_id;
-
-    insert into public.transactions
-        (user_id, txn_date, amount, kind, category, note, goal_id)
-    values
-        (current_user_id, current_date - 150, 175000, 'Income', 'Salary', 'Monthly salary', null),
-        (current_user_id, current_date - 146, 4200, 'Expense', 'Food', 'Groceries', null),
-        (current_user_id, current_date - 141, 1800, 'Expense', 'Transport', 'Commute', null),
-        (current_user_id, current_date - 120, 175000, 'Income', 'Salary', 'Monthly salary', null),
-        (current_user_id, current_date - 116, 7600, 'Expense', 'Utilities', 'Electricity and internet', null),
-        (current_user_id, current_date - 110, 5200, 'Expense', 'Food', 'Groceries', null),
-        (current_user_id, current_date - 90, 185000, 'Income', 'Salary', 'Monthly salary', null),
-        (current_user_id, current_date - 84, 3500, 'Expense', 'Shopping', 'Household items', null),
-        (current_user_id, current_date - 78, 4800, 'Expense', 'Food', 'Groceries', null),
-        (current_user_id, current_date - 60, 185000, 'Income', 'Salary', 'Monthly salary', null),
-        (current_user_id, current_date - 54, 8200, 'Expense', 'Utilities', 'Monthly bills', null),
-        (current_user_id, current_date - 48, 4900, 'Expense', 'Food', 'Groceries', null),
-        (current_user_id, current_date - 30, 185000, 'Income', 'Salary', 'Monthly salary', null),
-        (current_user_id, current_date - 24, 3200, 'Expense', 'Food', 'Groceries', null),
-        (current_user_id, current_date - 21, 1600, 'Expense', 'Transport', 'Commute', null),
-        (current_user_id, current_date - 17, 8200, 'Expense', 'Utilities', 'Monthly bills', null),
-        (current_user_id, current_date - 12, 4900, 'Expense', 'Shopping', 'Household items', null),
-        (current_user_id, current_date - 8, 22000, 'Income', 'Freelance', 'Design project', null),
-        (current_user_id, current_date - 5, 2700, 'Expense', 'Food', 'Groceries', null),
-        (current_user_id, current_date - 2, 10000, 'Expense', 'Savings contribution', 'Trip savings contribution', trip_goal_id);
+    values (current_user_id, trim(p_name), p_target, p_saved, p_due_date::text)
+    returning id into new_goal_id;
+    if p_saved > 0 then
+        insert into public.transactions (user_id, txn_date, amount, kind, category, note, goal_id)
+        values (current_user_id, p_today, p_saved, 'Expense', 'Savings contribution',
+                'Initial contribution · ' || trim(p_name), new_goal_id);
+    end if;
 end;
 $$;
+revoke all on function public.create_user_goal(text, numeric, numeric, date, date) from public, anon;
+grant execute on function public.create_user_goal(text, numeric, numeric, date, date) to authenticated;
 
-revoke all on function public.seed_demo_data() from public, anon;
-grant execute on function public.seed_demo_data() to authenticated;
+create or replace function public.add_goal_contribution(
+    p_goal_id bigint, p_amount numeric, p_txn_date date
+)
+returns void
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    current_user_id uuid := auth.uid();
+    goal_name text;
+begin
+    if current_user_id is null then raise exception 'Authentication required'; end if;
+    if p_amount is null or p_amount <= 0 then raise exception 'Invalid contribution'; end if;
+    update public.goals set saved = saved + p_amount
+    where id = p_goal_id and user_id = current_user_id
+    returning name into goal_name;
+    if not found then raise exception 'Goal not found'; end if;
+    insert into public.transactions (user_id, txn_date, amount, kind, category, note, goal_id)
+    values (current_user_id, p_txn_date, p_amount, 'Expense', 'Savings contribution',
+            'Contribution · ' || goal_name, p_goal_id);
+end;
+$$;
+revoke all on function public.add_goal_contribution(bigint, numeric, date) from public, anon;
+grant execute on function public.add_goal_contribution(bigint, numeric, date) to authenticated;
+
+create or replace function public.update_user_transaction(
+    p_transaction_id bigint, p_txn_date date, p_amount numeric, p_kind text,
+    p_category text, p_note text
+)
+returns void
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    current_user_id uuid := auth.uid();
+    old_row public.transactions%rowtype;
+    keep_goal boolean;
+    balance_delta numeric;
+begin
+    if current_user_id is null then raise exception 'Authentication required'; end if;
+    if p_amount is null or p_amount <= 0 or p_kind not in ('Income', 'Expense') then
+        raise exception 'Invalid transaction';
+    end if;
+    select * into old_row from public.transactions
+    where id = p_transaction_id and user_id = current_user_id for update;
+    if not found then raise exception 'Transaction not found'; end if;
+    keep_goal := p_kind = 'Expense' and p_category = 'Savings contribution';
+    if old_row.goal_id is not null then
+        balance_delta :=
+            (case when keep_goal then p_amount else 0 end)
+            - (case when old_row.kind = 'Expense' and old_row.category = 'Savings contribution'
+                    then old_row.amount else 0 end);
+        update public.goals set saved = greatest(0, saved + balance_delta)
+        where id = old_row.goal_id and user_id = current_user_id;
+    end if;
+    update public.transactions
+    set txn_date = p_txn_date, amount = p_amount, kind = p_kind,
+        category = p_category, note = coalesce(p_note, ''),
+        goal_id = case when keep_goal then old_row.goal_id else null end
+    where id = p_transaction_id and user_id = current_user_id;
+end;
+$$;
+revoke all on function public.update_user_transaction(bigint, date, numeric, text, text, text) from public, anon;
+grant execute on function public.update_user_transaction(bigint, date, numeric, text, text, text) to authenticated;
+
+create or replace function public.delete_user_transaction(p_transaction_id bigint)
+returns void
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    current_user_id uuid := auth.uid();
+    old_row public.transactions%rowtype;
+begin
+    if current_user_id is null then raise exception 'Authentication required'; end if;
+    select * into old_row from public.transactions
+    where id = p_transaction_id and user_id = current_user_id for update;
+    if not found then raise exception 'Transaction not found'; end if;
+    if old_row.goal_id is not null and old_row.kind = 'Expense'
+       and old_row.category = 'Savings contribution' then
+        update public.goals set saved = greatest(0, saved - old_row.amount)
+        where id = old_row.goal_id and user_id = current_user_id;
+    end if;
+    delete from public.transactions where id = p_transaction_id and user_id = current_user_id;
+end;
+$$;
+revoke all on function public.delete_user_transaction(bigint) from public, anon;
+grant execute on function public.delete_user_transaction(bigint) to authenticated;
+
+create or replace function public.rename_user_category(p_old_name text, p_new_name text)
+returns void
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    current_user_id uuid := auth.uid();
+    category_id bigint;
+begin
+    if current_user_id is null then raise exception 'Authentication required'; end if;
+    if nullif(trim(p_new_name), '') is null then raise exception 'Category name cannot be empty'; end if;
+    if p_old_name = p_new_name then return; end if;
+    update public.categories set name = p_new_name
+    where user_id = current_user_id and name = p_old_name returning id into category_id;
+    if not found then raise exception 'Custom category not found'; end if;
+    update public.transactions set category = p_new_name
+    where user_id = current_user_id and category = p_old_name;
+    update public.budgets set category = p_new_name
+    where user_id = current_user_id and category = p_old_name;
+end;
+$$;
+revoke all on function public.rename_user_category(text, text) from public, anon;
+grant execute on function public.rename_user_category(text, text) to authenticated;
+
+create or replace function public.import_user_transactions(p_rows jsonb)
+returns void
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    current_user_id uuid := auth.uid();
+    item jsonb;
+begin
+    if current_user_id is null then raise exception 'Authentication required'; end if;
+    if jsonb_typeof(p_rows) is distinct from 'array' then raise exception 'Rows must be a JSON array'; end if;
+    if jsonb_array_length(p_rows) < 1 or jsonb_array_length(p_rows) > 2000 then
+        raise exception 'Invalid import size';
+    end if;
+    for item in select value from jsonb_array_elements(p_rows)
+    loop
+        insert into public.transactions (user_id, txn_date, amount, kind, category, note)
+        values (current_user_id, (item->>'txn_date')::date, (item->>'amount')::numeric,
+                item->>'kind', item->>'category', coalesce(item->>'note', ''));
+    end loop;
+end;
+$$;
+revoke all on function public.import_user_transactions(jsonb) from public, anon;
+grant execute on function public.import_user_transactions(jsonb) to authenticated;
+
+-- Must be installed by the privileged SQL editor role. This function can only
+-- delete auth.uid(); the ON DELETE CASCADE FKs remove that user's account rows.
+-- Do not use a service-role key in the Streamlit app.
+create or replace function public.delete_my_account()
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+    current_user_id uuid := auth.uid();
+begin
+    if current_user_id is null then raise exception 'Authentication required'; end if;
+    delete from auth.users where id = current_user_id;
+    if not found then raise exception 'Account not found'; end if;
+end;
+$$;
+revoke all on function public.delete_my_account() from public, anon;
+grant execute on function public.delete_my_account() to authenticated;
+
+-- The demo now runs only in the separately labelled local SQLite workspace.
+-- Removing an old remote demo RPC does not delete any existing account rows.
+drop function if exists public.seed_demo_data();
+
+-- Make newly created RPC signatures visible to PostgREST immediately.
+notify pgrst, 'reload schema';
