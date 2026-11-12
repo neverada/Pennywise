@@ -1,6 +1,6 @@
 # PennyWise - Personal Expense & Budget Dashboard
 
-PennyWise is a modern personal finance tracking dashboard built with Python and Streamlit. It helps users manage their income, track expenses, set category budgets, monitor savings goals, and visualize cash flow trends across multiple months.
+PennyWise is a modern personal finance tracking dashboard built with Python and Streamlit. It helps users manage their income, track expenses, set category budgets, monitor savings goals, and visualize cash flow trends across multiple months with demonstration dataset of more than 100 transactions spanning from august to october
 
 ---
 
